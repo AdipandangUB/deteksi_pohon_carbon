@@ -1,6 +1,6 @@
 """
 ============================================================
-Deteksi Pohon & Estimasi Karbon — OPTIMIZED FOR 300MB FILES
+Deteksi Pohon & Estimasi Karbon 
 ============================================================
 Perbaikan:
 - streamlit server max upload size dikonfigurasi via .streamlit/config.toml (bukan env var)
@@ -117,7 +117,7 @@ html, body, [class*="css"] {{ font-family: 'DM Sans', sans-serif; }}
 """, unsafe_allow_html=True)
 
 # ── Batas ukuran upload ────────────────────────────────────────
-MAX_UPLOAD_SIZE_MB  = 300
+MAX_UPLOAD_SIZE_MB  = 200
 MAX_UPLOAD_BYTES    = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 CHUNK_SIZE          = 50 * 1024 * 1024   # 50 MB per chunk
 MAX_PIXEL_DIM       = 4000               # downscale jika lebih besar
@@ -125,7 +125,7 @@ MAX_PIXEL_DIM       = 4000               # downscale jika lebih besar
 # CATATAN: Untuk mengaktifkan upload 300 MB di Streamlit, buat file
 #   .streamlit/config.toml  dengan isi:
 #   [server]
-#   maxUploadSize = 300
+#   maxUploadSize = 200
 
 # ══════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1136,8 +1136,6 @@ def render_sidebar() -> dict:
 <div class="upload-warning">
 ⚠️ Batas Upload: <b>{MAX_UPLOAD_SIZE_MB} MB</b><br>
 <small>Format: GeoTIFF (.tif/.tiff), JPG, PNG</small><br>
-<small>Tambahkan <code>.streamlit/config.toml</code> dengan<br>
-<code>[server] maxUploadSize = 300</code></small>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1215,7 +1213,7 @@ def main():
     <p><span class="badge">🛸 UAV Remote Sensing</span>
        <span class="badge">🌿 UB Forest</span>
        <span class="badge">📡 Mask R-CNN</span></p>
-    <p><small>Credit: Dr. Adipandang Yudono | Ananda Nibras Naditya Lokiko</small></p>
+    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB)| Ananda Nibras Naditya Lokiko (Data Analyst - Kehutanan UB)</small></p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1240,7 +1238,7 @@ def main():
 1. **Konfigurasi upload 300 MB** — buat file `.streamlit/config.toml`:
    ```
    [server]
-   maxUploadSize = 300
+   maxUploadSize = 200
    ```
 
 2. Upload foto udara di sidebar (GeoTIFF / JPG / PNG, maks **{MAX_UPLOAD_SIZE_MB} MB**)
