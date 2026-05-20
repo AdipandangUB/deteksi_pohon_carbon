@@ -1,6 +1,6 @@
 """
 ============================================================
-Deteksi Pohon & Estimasi Karbon — DENGAN DUKUNGAN GEOTIFF
+Deteksi Pohon & Estimasi Karbon — OPTIMIZED FOR 300MB FILES
 ============================================================
 """
 
@@ -23,6 +23,7 @@ import base64
 import json
 from functools import lru_cache
 import time
+import gc  # Garbage collector untuk membersihkan memory
 
 warnings.filterwarnings("ignore")
 
@@ -63,9 +64,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# === Batas upload sebesar 300MB ===
+# === OPTIMASI UNTUK FILE BESAR 300MB ===
 MAX_UPLOAD_SIZE_MB = 300
 MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# Konfigurasi chunk size untuk membaca file besar
+CHUNK_SIZE = 1024 * 1024 * 50  # 50MB chunks
+
+# Set memory optimization
+os.environ['STREAMLIT_SERVER_MAX_UPLOAD_SIZE'] = str(MAX_UPLOAD_SIZE_MB)
+os.environ['STREAMLIT_BROWSER_GATHER_USAGE_STATS'] = 'false'
 
 # ──────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -112,7 +120,7 @@ UB_FOREST_LON  = 112.5853
 UB_FOREST_ZOOM = 15
 
 # ──────────────────────────────────────────────────────────────
-# IMPORT GEOSPATIAL LIBRARIES
+# IMPORT LIBRARIES dengan Error Handling
 # ──────────────────────────────────────────────────────────────
 HAS_RASTERIO = False
 HAS_TIFFFILE = False
@@ -120,24 +128,19 @@ HAS_SCIPY = False
 HAS_SKIMAGE = False
 HAS_CV2 = False
 
-# Coba import rasterio untuk GeoTIFF
 try:
     import rasterio
-    from rasterio.transform import rowcol
+    from rasterio import MemoryFile
     HAS_RASTERIO = True
-    print("✅ rasterio loaded successfully")
-except ImportError as e:
-    print(f"⚠️ rasterio not available: {e}")
+except ImportError:
+    pass
 
-# Coba import tifffile sebagai alternatif
 try:
     import tifffile
     HAS_TIFFFILE = True
-    print("✅ tifffile loaded successfully")
-except ImportError as e:
-    print(f"⚠️ tifffile not available: {e}")
+except ImportError:
+    pass
 
-# Coba import library lainnya
 try:
     from scipy import ndimage
     from scipy.ndimage import gaussian_filter, label, maximum_filter
@@ -150,17 +153,12 @@ try:
     from skimage.feature import peak_local_max
     from skimage.measure import regionprops
     from skimage.filters import gaussian
+    from skimage.transform import resize
     HAS_SKIMAGE = True
 except ImportError:
     pass
 
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    pass
-
-# Fallback functions (sama seperti sebelumnya)
+# Fallback functions
 def gaussian_filter_fallback(image, sigma=1):
     if sigma == 0:
         return image
@@ -174,79 +172,80 @@ def gaussian_filter_fallback(image, sigma=1):
     return image
 
 def peak_local_max_fallback(image, min_distance=10, threshold_abs=0, exclude_border=False, num_peaks=10000):
-    from scipy import ndimage
-    from scipy.ndimage import maximum_filter
-    
-    size = 2 * min_distance + 1
-    max_filtered = maximum_filter(image, size=size)
-    peaks = (image == max_filtered) & (image >= threshold_abs)
-    coords = np.argwhere(peaks)
-    
-    if exclude_border:
-        coords = coords[(coords[:, 0] >= min_distance) & (coords[:, 0] < image.shape[0] - min_distance) &
-                        (coords[:, 1] >= min_distance) & (coords[:, 1] < image.shape[1] - min_distance)]
-    
-    if len(coords) > num_peaks:
-        intensities = image[coords[:, 0], coords[:, 1]]
-        idx = np.argsort(intensities)[-num_peaks:]
-        coords = coords[idx]
-    
-    return coords
+    try:
+        from scipy.ndimage import maximum_filter
+        size = 2 * min_distance + 1
+        max_filtered = maximum_filter(image, size=size)
+        peaks = (image == max_filtered) & (image >= threshold_abs)
+        coords = np.argwhere(peaks)
+        
+        if exclude_border:
+            coords = coords[(coords[:, 0] >= min_distance) & (coords[:, 0] < image.shape[0] - min_distance) &
+                            (coords[:, 1] >= min_distance) & (coords[:, 1] < image.shape[1] - min_distance)]
+        
+        if len(coords) > num_peaks:
+            intensities = image[coords[:, 0], coords[:, 1]]
+            idx = np.argsort(intensities)[-num_peaks:]
+            coords = coords[idx]
+        
+        return coords
+    except:
+        return np.array([[0, 0]])
 
 def watershed_fallback(image, markers, mask=None, compactness=0):
-    from scipy import ndimage
-    from scipy.ndimage import binary_dilation
-    
-    labels = np.zeros_like(image, dtype=int)
-    for i, (r, c) in enumerate(markers, start=1):
-        if 0 <= r < image.shape[0] and 0 <= c < image.shape[1]:
-            labels[r, c] = i
-    
-    kernel = np.ones((3, 3))
-    for _ in range(1, 11):
-        for label_id in range(1, len(markers) + 1):
-            mask_label = (labels == label_id)
-            if mask_label.any():
-                dilated = binary_dilation(mask_label, kernel)
-                labels[dilated & (labels == 0)] = label_id
-                if mask is not None:
-                    labels[~mask] = 0
-    
-    return labels
+    try:
+        from scipy.ndimage import binary_dilation
+        labels = np.zeros_like(image, dtype=int)
+        for i, (r, c) in enumerate(markers, start=1):
+            if 0 <= r < image.shape[0] and 0 <= c < image.shape[1]:
+                labels[r, c] = i
+        
+        kernel = np.ones((3, 3))
+        for _ in range(1, 11):
+            for label_id in range(1, len(markers) + 1):
+                mask_label = (labels == label_id)
+                if mask_label.any():
+                    dilated = binary_dilation(mask_label, kernel)
+                    labels[dilated & (labels == 0)] = label_id
+                    if mask is not None:
+                        labels[~mask] = 0
+        return labels
+    except:
+        return np.zeros_like(image, dtype=int)
 
 def regionprops_fallback(labels, intensity_image=None):
-    from scipy import ndimage
-    from scipy.ndimage import find_objects
-    
-    props_list = []
-    slices = find_objects(labels)
-    
-    for i, slice_obj in enumerate(slices):
-        if slice_obj is None:
-            continue
-        label_id = i + 1
-        mask = (labels[slice_obj] == label_id)
+    try:
+        from scipy.ndimage import find_objects
+        props_list = []
+        slices = find_objects(labels)
         
-        if not mask.any():
-            continue
-        
-        area = mask.sum()
-        
-        class Prop:
-            def __init__(self, area_val, label_val, bbox_val):
-                self.area = area_val
-                self.label = label_val
-                self.bbox = bbox_val
-                self.centroid = (
-                    (slice_obj[0].start + slice_obj[0].stop) / 2,
-                    (slice_obj[1].start + slice_obj[1].stop) / 2
-                )
-                self.max_intensity = np.max(intensity_image[slice_obj][mask]) if intensity_image is not None else 0
-        
-        props_list.append(Prop(area, label_id, (slice_obj[0].start, slice_obj[1].start, 
-                                                 slice_obj[0].stop, slice_obj[1].stop)))
-    
-    return props_list
+        for i, slice_obj in enumerate(slices):
+            if slice_obj is None:
+                continue
+            label_id = i + 1
+            mask = (labels[slice_obj] == label_id)
+            
+            if not mask.any():
+                continue
+            
+            area = mask.sum()
+            
+            class Prop:
+                def __init__(self, area_val, label_val, bbox_val):
+                    self.area = area_val
+                    self.label = label_val
+                    self.bbox = bbox_val
+                    self.centroid = (
+                        (slice_obj[0].start + slice_obj[0].stop) / 2,
+                        (slice_obj[1].start + slice_obj[1].stop) / 2
+                    )
+                    self.max_intensity = np.max(intensity_image[slice_obj][mask]) if intensity_image is not None else 0
+            
+            props_list.append(Prop(area, label_id, (slice_obj[0].start, slice_obj[1].start, 
+                                                     slice_obj[0].stop, slice_obj[1].stop)))
+        return props_list
+    except:
+        return []
 
 # Gunakan fungsi fallback jika library tidak tersedia
 if not HAS_SKIMAGE:
@@ -264,18 +263,16 @@ else:
     from scipy.ndimage import gaussian_filter
 
 # ──────────────────────────────────────────────────────────────
-# GEOTIFF READING FUNCTIONS - DIPERBAIKI
+# FUNGSI UNTUK MEMBACA FILE BESAR - OPTIMIZED
 # ──────────────────────────────────────────────────────────────
 def _normalize_band(arr: np.ndarray, percentile: int = 98) -> np.ndarray:
-    """Normalisasi band untuk visualisasi 8-bit"""
+    """Normalisasi band untuk visualisasi 8-bit dengan optimasi memory"""
     arr = arr.astype(np.float32)
-    # Hanya ambil nilai positif
     pos = arr[arr > 0]
     if len(pos) > 0:
         hi_clip = np.percentile(pos, percentile)
         arr = np.clip(arr, 0, hi_clip)
     
-    # Stretch ke 0-255
     lo = np.percentile(arr, 2)
     hi = np.percentile(arr, percentile)
     if hi - lo > 0:
@@ -285,19 +282,50 @@ def _normalize_band(arr: np.ndarray, percentile: int = 98) -> np.ndarray:
     
     return arr.astype(np.uint8)
 
+def read_large_tiff_chunked(file_path: str) -> Optional[np.ndarray]:
+    """Membaca file TIFF besar dengan chunking untuk menghemat memory"""
+    if not HAS_TIFFFILE:
+        return None
+    
+    try:
+        # Baca metadata terlebih dahulu
+        with tifffile.TiffFile(file_path) as tif:
+            page = tif.pages[0]
+            shape = page.shape
+            dtype = page.dtype
+            
+            # Jika gambar terlalu besar (>4000px), resize saat membaca
+            max_dim = 4000
+            if max(shape[0], shape[1]) > max_dim:
+                scale = max_dim / max(shape[0], shape[1])
+                new_shape = (int(shape[0] * scale), int(shape[1] * scale))
+                
+                # Baca dengan resize
+                img = tifffile.imread(file_path)
+                if len(img.shape) == 3:
+                    from skimage.transform import resize
+                    img_resized = resize(img, (new_shape[0], new_shape[1], img.shape[2]), 
+                                        preserve_range=True, anti_aliasing=True).astype(dtype)
+                else:
+                    from skimage.transform import resize
+                    img_resized = resize(img, new_shape, preserve_range=True, 
+                                        anti_aliasing=True).astype(dtype)
+                return img_resized
+        
+        # Baca normal jika ukuran OK
+        return tifffile.imread(file_path)
+    except Exception as e:
+        st.warning(f"Chunked read failed: {str(e)[:100]}")
+        return None
+
 def read_geotiff_with_rasterio(file_data: bytes) -> Tuple[Optional[np.ndarray], dict]:
-    """Membaca GeoTIFF menggunakan rasterio"""
+    """Membaca GeoTIFF menggunakan rasterio dengan optimasi memory"""
     if not HAS_RASTERIO:
         return None, {}
     
     try:
-        # Gunakan MemoryFile untuk membaca dari bytes
         with rasterio.MemoryFile(file_data) as memfile:
             with memfile.open() as src:
-                # Baca data
-                img_data = src.read()
-                
-                # Metadata
                 meta = {
                     "width": src.width,
                     "height": src.height,
@@ -308,52 +336,78 @@ def read_geotiff_with_rasterio(file_data: bytes) -> Tuple[Optional[np.ndarray], 
                     "bounds": src.bounds if src.crs else None,
                 }
                 
-                # Hitung GSD dari transform
                 if src.transform:
                     meta["gsd_m"] = abs(src.transform[0])
                 
-                # Konversi ke RGB
-                if src.count >= 3:
-                    # Ambil 3 band pertama
-                    r = img_data[0]
-                    g = img_data[1]
-                    b = img_data[2]
+                # Jika gambar terlalu besar, lakukan downsampling
+                max_dim = 4000
+                if max(src.height, src.width) > max_dim:
+                    scale = max_dim / max(src.height, src.width)
+                    new_height = int(src.height * scale)
+                    new_width = int(src.width * scale)
                     
-                    # Normalisasi setiap band
-                    r_norm = _normalize_band(r)
-                    g_norm = _normalize_band(g)
-                    b_norm = _normalize_band(b)
+                    # Baca dengan out_shape untuk downsampling
+                    if src.count >= 3:
+                        r = src.read(1, out_shape=(new_height, new_width))
+                        g = src.read(2, out_shape=(new_height, new_width))
+                        b = src.read(3, out_shape=(new_height, new_width))
+                    else:
+                        r = src.read(1, out_shape=(new_height, new_width))
+                        g = r.copy()
+                        b = r.copy()
                     
-                    # Stack menjadi RGB
-                    rgb = np.stack([r_norm, g_norm, b_norm], axis=2)
-                    
-                elif src.count == 1:
-                    # Single band - replicate ke 3 band
-                    gray = _normalize_band(img_data[0])
-                    rgb = np.stack([gray, gray, gray], axis=2)
-                    
+                    meta["original_size"] = (src.height, src.width)
+                    meta["resized_to"] = (new_height, new_width)
                 else:
-                    # 2 bands - gunakan band 1 untuk R dan G, band 2 untuk B
-                    band1 = _normalize_band(img_data[0])
-                    band2 = _normalize_band(img_data[1])
-                    rgb = np.stack([band1, band1, band2], axis=2)
+                    if src.count >= 3:
+                        r = src.read(1)
+                        g = src.read(2)
+                        b = src.read(3)
+                    elif src.count == 2:
+                        r = src.read(1)
+                        g = src.read(2)
+                        b = g.copy()
+                    else:
+                        r = src.read(1)
+                        g = r.copy()
+                        b = r.copy()
+                
+                # Normalisasi
+                r_norm = _normalize_band(r.astype(np.float32))
+                g_norm = _normalize_band(g.astype(np.float32))
+                b_norm = _normalize_band(b.astype(np.float32))
+                
+                rgb = np.stack([r_norm, g_norm, b_norm], axis=2)
+                
+                # Bersihkan memory
+                del r, g, b, r_norm, g_norm, b_norm
+                gc.collect()
                 
                 return rgb, meta
                 
     except Exception as e:
-        st.warning(f"rasterio gagal membaca GeoTIFF: {str(e)[:100]}")
+        st.warning(f"rasterio error: {str(e)[:100]}")
         return None, {}
 
-def read_geotiff_with_tifffile(file_data: bytes) -> Tuple[Optional[np.ndarray], dict]:
-    """Membaca TIFF menggunakan tifffile (alternatif)"""
+def read_tiff_with_tifffile(file_data: bytes) -> Tuple[Optional[np.ndarray], dict]:
+    """Membaca TIFF menggunakan tifffile dengan optimasi memory"""
     if not HAS_TIFFFILE:
         return None, {}
     
     try:
-        # Simpan sementara ke bytes IO
-        with io.BytesIO(file_data) as bio:
-            # Baca dengan tifffile
-            img_data = tifffile.imread(bio)
+        # Simpan ke temporary file untuk file besar
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=True) as tmpfile:
+            # Tulis dalam chunks untuk file besar
+            for i in range(0, len(file_data), CHUNK_SIZE):
+                chunk = file_data[i:i+CHUNK_SIZE]
+                tmpfile.write(chunk)
+            tmpfile.flush()
+            
+            # Baca dengan optimasi
+            img_data = read_large_tiff_chunked(tmpfile.name)
+            
+            if img_data is None:
+                return None, {}
             
             meta = {
                 "width": img_data.shape[1] if len(img_data.shape) > 1 else img_data.shape[0],
@@ -365,45 +419,61 @@ def read_geotiff_with_tifffile(file_data: bytes) -> Tuple[Optional[np.ndarray], 
             # Konversi ke RGB
             if len(img_data.shape) == 3:
                 if img_data.shape[2] >= 3:
-                    # Ambil 3 band pertama
                     r = img_data[:, :, 0].astype(np.float32)
                     g = img_data[:, :, 1].astype(np.float32)
                     b = img_data[:, :, 2].astype(np.float32)
-                    
-                    r_norm = _normalize_band(r)
-                    g_norm = _normalize_band(g)
-                    b_norm = _normalize_band(b)
-                    
-                    rgb = np.stack([r_norm, g_norm, b_norm], axis=2)
-                    
-                elif img_data.shape[2] == 1:
-                    gray = _normalize_band(img_data[:, :, 0].astype(np.float32))
-                    rgb = np.stack([gray, gray, gray], axis=2)
+                elif img_data.shape[2] == 2:
+                    r = img_data[:, :, 0].astype(np.float32)
+                    g = img_data[:, :, 1].astype(np.float32)
+                    b = g.copy()
                 else:
-                    # 2 bands
-                    band1 = _normalize_band(img_data[:, :, 0].astype(np.float32))
-                    band2 = _normalize_band(img_data[:, :, 1].astype(np.float32))
-                    rgb = np.stack([band1, band1, band2], axis=2)
-                    
+                    r = img_data[:, :, 0].astype(np.float32)
+                    g = r.copy()
+                    b = r.copy()
             elif len(img_data.shape) == 2:
-                # Grayscale
-                gray = _normalize_band(img_data.astype(np.float32))
-                rgb = np.stack([gray, gray, gray], axis=2)
+                r = img_data.astype(np.float32)
+                g = r.copy()
+                b = r.copy()
             else:
                 return None, {}
+            
+            # Normalisasi
+            max_val = np.percentile(r[r > 0], 98) if np.any(r > 0) else r.max()
+            r = np.clip(r, 0, max_val)
+            g = np.clip(g, 0, max_val)
+            b = np.clip(b, 0, max_val)
+            
+            lo_r, hi_r = np.percentile(r, 2), np.percentile(r, 98)
+            lo_g, hi_g = np.percentile(g, 2), np.percentile(g, 98)
+            lo_b, hi_b = np.percentile(b, 2), np.percentile(b, 98)
+            
+            if hi_r - lo_r > 0:
+                r = np.clip((r - lo_r) / (hi_r - lo_r) * 255, 0, 255)
+            if hi_g - lo_g > 0:
+                g = np.clip((g - lo_g) / (hi_g - lo_g) * 255, 0, 255)
+            if hi_b - lo_b > 0:
+                b = np.clip((b - lo_b) / (hi_b - lo_b) * 255, 0, 255)
+            
+            rgb = np.stack([r.astype(np.uint8), g.astype(np.uint8), b.astype(np.uint8)], axis=2)
+            
+            # Bersihkan memory
+            del img_data, r, g, b
+            gc.collect()
             
             return rgb, meta
             
     except Exception as e:
-        st.warning(f"tifffile gagal membaca: {str(e)[:100]}")
+        st.warning(f"tifffile error: {str(e)[:100]}")
         return None, {}
 
 # ──────────────────────────────────────────────────────────────
-# FILE VALIDATION - DIPERBAIKI
+# FILE VALIDATION - OPTIMIZED
 # ──────────────────────────────────────────────────────────────
 def validate_file_size(uploaded_file, file_type: str = "file") -> Tuple[bool, float]:
     if uploaded_file is None:
         return True, 0.0
+    
+    # Gunakan seek untuk file besar
     uploaded_file.seek(0, 2)
     file_size = uploaded_file.tell()
     uploaded_file.seek(0)
@@ -417,6 +487,11 @@ def validate_file_size(uploaded_file, file_type: str = "file") -> Tuple[bool, fl
             ukuran_display = f"{size_mb:.2f} MB"
         st.error(f"❌ **{file_type} terlalu besar!**\nUkuran: **{ukuran_display}**\nMaksimum: **{MAX_UPLOAD_SIZE_MB} MB**")
         return False, size_mb
+    
+    # Tampilkan peringatan jika file > 200MB
+    if size_mb > 200:
+        st.warning(f"⚠️ File berukuran **{size_mb:.1f} MB**. Proses mungkin memerlukan waktu lebih lama.")
+    
     return True, size_mb
 
 def format_file_size(size_mb: float) -> str:
@@ -427,7 +502,7 @@ def format_file_size(size_mb: float) -> str:
 
 def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
     """
-    Memuat gambar dari berbagai format (GeoTIFF, TIFF, JPG, PNG)
+    Memuat gambar dari berbagai format dengan optimasi untuk file besar
     """
     meta = {
         "width": 0, "height": 0, "bands": 0, "crs": None,
@@ -451,40 +526,44 @@ def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
     st.info(f"📁 Memproses file: {name} ({meta['file_size_display']})")
     
     # CEK APAKAH FILE TIFF/GEOTIFF
-    is_tiff = name.endswith(('.tif', '.tiff', '.geotiff', '.tif', '.jp2'))
+    is_tiff = name.endswith(('.tif', '.tiff', '.geotiff', '.jp2'))
     
     if is_tiff:
         st.info("🔍 Mendeteksi file TIFF/GeoTIFF...")
         
         # Coba dengan rasterio terlebih dahulu
         if HAS_RASTERIO:
-            st.info("📡 Mencoba membaca dengan rasterio...")
-            rgb, meta_r = read_geotiff_with_rasterio(data)
-            if rgb is not None:
-                meta.update(meta_r)
-                st.success("✅ Berhasil membaca GeoTIFF dengan rasterio")
-                return rgb, meta
+            with st.spinner("📡 Membaca dengan rasterio (optimasi memory)..."):
+                rgb, meta_r = read_geotiff_with_rasterio(data)
+                if rgb is not None:
+                    meta.update(meta_r)
+                    st.success("✅ Berhasil membaca GeoTIFF dengan rasterio")
+                    return rgb, meta
         
         # Coba dengan tifffile sebagai alternatif
         if HAS_TIFFFILE:
-            st.info("📡 Mencoba membaca dengan tifffile...")
-            rgb, meta_r = read_geotiff_with_tifffile(data)
-            if rgb is not None:
-                meta.update(meta_r)
-                st.success("✅ Berhasil membaca TIFF dengan tifffile")
-                return rgb, meta
+            with st.spinner("📡 Membaca dengan tifffile (optimasi memory)..."):
+                rgb, meta_r = read_tiff_with_tifffile(data)
+                if rgb is not None:
+                    meta.update(meta_r)
+                    st.success("✅ Berhasil membaca TIFF dengan tifffile")
+                    return rgb, meta
         
-        # Jika semua gagal
-        st.error("❌ Gagal membaca file TIFF. Pastikan file valid dan tidak corrupt.")
-        st.info("💡 Tips: Coba konversi file ke JPG/PNG terlebih dahulu, atau pastikan rasterio terinstall.")
+        st.error("❌ Gagal membaca file TIFF.")
         return None, meta
     
     # Baca sebagai gambar biasa (JPG, PNG)
     try:
-        st.info("📸 Mencoba membaca sebagai gambar biasa...")
+        st.info("📸 Membaca sebagai gambar biasa...")
         img = Image.open(io.BytesIO(data))
         
-        # Konversi ke RGB jika perlu
+        # Resize jika terlalu besar untuk menghemat memory
+        if img.size[0] > 4000 or img.size[1] > 4000:
+            st.info("🔄 Meresize gambar untuk optimasi memory...")
+            scale = min(4000 / img.size[0], 4000 / img.size[1])
+            new_size = (int(img.size[0] * scale), int(img.size[1] * scale))
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
@@ -514,19 +593,15 @@ def load_sample_image(uploaded_file, sample_name: str = "Sampel") -> Optional[np
     is_tiff = name.endswith(('.tif', '.tiff', '.geotiff'))
     
     if is_tiff:
-        # Coba dengan rasterio
         if HAS_RASTERIO:
             rgb, _ = read_geotiff_with_rasterio(data)
             if rgb is not None:
                 return rgb
-        
-        # Coba dengan tifffile
         if HAS_TIFFFILE:
-            rgb, _ = read_geotiff_with_tifffile(data)
+            rgb, _ = read_tiff_with_tifffile(data)
             if rgb is not None:
                 return rgb
     
-    # Baca sebagai gambar biasa
     try:
         img = Image.open(io.BytesIO(data))
         if img.mode != 'RGB':
@@ -536,42 +611,44 @@ def load_sample_image(uploaded_file, sample_name: str = "Sampel") -> Optional[np
         return None
 
 # ──────────────────────────────────────────────────────────────
-# FUNGSI LAINNYA (sama seperti sebelumnya - tidak diubah)
+# CHM SIMULATION - OPTIMIZED
 # ──────────────────────────────────────────────────────────────
-
 def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
                           gsd_m: float = 0.1) -> np.ndarray:
     h, w = rgb.shape[:2]
+    
+    # Batasi ukuran maksimum untuk CHM (2048px)
     max_size = 2048
     if max(h, w) > max_size:
         scale = max_size / max(h, w)
         new_h, new_w = int(h * scale), int(w * scale)
+        st.info(f"🔄 Meresize CHM dari {h}x{w} ke {new_h}x{new_w} untuk optimasi...")
         rgb_work = np.array(Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS))
         scale_back = True
     else:
         rgb_work = rgb
         scale_back = False
 
-    R = rgb_work[:, :, 0].astype(float)
-    G = rgb_work[:, :, 1].astype(float)
-    B = rgb_work[:, :, 2].astype(float)
+    R = rgb_work[:, :, 0].astype(np.float32)
+    G = rgb_work[:, :, 1].astype(np.float32)
+    B = rgb_work[:, :, 2].astype(np.float32)
     brightness = (R + G + B) / 3.0
 
     total = R + G + B + 1e-6
     exg = (2 * G - R - B) / total
     bpi = (B - R) / (B + R + 1e-6)
 
-    pinus_score  = np.clip(bpi * 0.6 + (1 - brightness / 255) * 0.4, 0, 1)
+    pinus_score = np.clip(bpi * 0.6 + (1 - brightness / 255) * 0.4, 0, 1)
     mahoni_score = np.clip(exg * 1.5 + (brightness / 255) * 0.3, 0, 1)
 
-    ps = (pinus_score  - pinus_score.min())  / (pinus_score.max()  - pinus_score.min()  + 1e-6)
+    ps = (pinus_score - pinus_score.min()) / (pinus_score.max() - pinus_score.min() + 1e-6)
     ms = (mahoni_score - mahoni_score.min()) / (mahoni_score.max() - mahoni_score.min() + 1e-6)
 
     combined_score = np.maximum(ps, ms)
 
     non_veg_mask = (
         (brightness > 220) |
-        (brightness < 15)  |
+        (brightness < 15) |
         ((R - G) > 30)
     )
     combined_score[non_veg_mask] = 0
@@ -579,7 +656,7 @@ def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
     chm_raw = combined_score * 40.0
 
     if HAS_SCIPY:
-        chm = gaussian_filter(chm_raw.astype(float), sigma=sigma)
+        chm = gaussian_filter(chm_raw.astype(np.float32), sigma=sigma)
     else:
         from PIL import ImageFilter
         chm_img = Image.fromarray(chm_raw.astype(np.float32))
@@ -587,13 +664,20 @@ def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
         radius = int(sigma * 2)
         if radius > 0:
             chm_img = chm_img.filter(ImageFilter.GaussianBlur(radius=radius))
-        chm = np.array(chm_img)
+        chm = np.array(chm_img, dtype=np.float32)
 
     if scale_back:
         chm = np.array(Image.fromarray(chm).resize((w, h), Image.BICUBIC))
+    
+    # Bersihkan memory
+    del R, G, B, brightness, total, exg, bpi, pinus_score, mahoni_score, ps, ms, combined_score, chm_raw
+    gc.collect()
 
-    return chm.astype(float)
+    return chm.astype(np.float32)
 
+# ──────────────────────────────────────────────────────────────
+# TREE DETECTION - OPTIMIZED
+# ──────────────────────────────────────────────────────────────
 def detect_trees(chm: np.ndarray, min_height: float = 3.0,
                  min_distance_px: int = 15, gsd_m: float = 0.1):
     chm_masked = chm.copy()
@@ -606,14 +690,17 @@ def detect_trees(chm: np.ndarray, min_height: float = 3.0,
         exclude_border=False,
         num_peaks=10000,
     )
-    markers = np.zeros(chm.shape, dtype=int)
+    markers = np.zeros(chm.shape, dtype=np.int32)
     for i, (r, c) in enumerate(coords, start=1):
         if 0 <= r < chm.shape[0] and 0 <= c < chm.shape[1]:
             markers[r, c] = i
     labels = watershed(-chm_masked, markers, mask=chm_masked > 0, compactness=0.01)
-    peaks = coords
-
-    return labels, peaks
+    
+    # Bersihkan memory
+    del chm_masked, markers
+    gc.collect()
+    
+    return labels, coords
 
 def extract_tree_metrics(labels, peaks, chm, rgb, gsd_m=0.1):
     records = []
@@ -634,11 +721,11 @@ def extract_tree_metrics(labels, peaks, chm, rgb, gsd_m=0.1):
         if y2 <= y1 or x2 <= x1:
             continue
         mask_region = (labels[y1:y2, x1:x2] == prop.label)
-        rgb_region  = rgb[y1:y2, x1:x2]
+        rgb_region = rgb[y1:y2, x1:x2]
         if mask_region.any():
-            r_mean = float(rgb_region[:, :, 0][mask_region].mean())
-            g_mean = float(rgb_region[:, :, 1][mask_region].mean())
-            b_mean = float(rgb_region[:, :, 2][mask_region].mean())
+            r_mean = float(np.mean(rgb_region[:, :, 0][mask_region]))
+            g_mean = float(np.mean(rgb_region[:, :, 1][mask_region]))
+            b_mean = float(np.mean(rgb_region[:, :, 2][mask_region]))
         else:
             r_mean, g_mean, b_mean = 100.0, 140.0, 80.0
         records.append({
@@ -651,23 +738,31 @@ def extract_tree_metrics(labels, peaks, chm, rgb, gsd_m=0.1):
             "bbox_minr": int(bbox[0]), "bbox_minc": int(bbox[1]),
             "bbox_maxr": int(bbox[2]), "bbox_maxc": int(bbox[3]),
         })
+    
+    # Bersihkan memory
+    del props, labels
+    gc.collect()
+    
     return pd.DataFrame(records)
 
+# ──────────────────────────────────────────────────────────────
+# SPECIES CLASSIFICATION - OPTIMIZED
+# ──────────────────────────────────────────────────────────────
 def _extract_spectral_ref(img_arr: np.ndarray) -> dict:
-    R = img_arr[:, :, 0].astype(float)
-    G = img_arr[:, :, 1].astype(float)
-    B = img_arr[:, :, 2].astype(float)
+    R = img_arr[:, :, 0].astype(np.float32)
+    G = img_arr[:, :, 1].astype(np.float32)
+    B = img_arr[:, :, 2].astype(np.float32)
     brightness = (R + G + B) / 3.0
     veg_mask = (brightness > 30) & (brightness < 230) & (
         (G > R * 0.9) | (B > R * 0.9)
     )
     if veg_mask.sum() < 100:
         veg_mask = np.ones_like(brightness, dtype=bool)
-    r_m = R[veg_mask].mean()
-    g_m = G[veg_mask].mean()
-    b_m = B[veg_mask].mean()
-    bright_m = brightness[veg_mask].mean()
-    gb_diff   = g_m - b_m
+    r_m = np.mean(R[veg_mask])
+    g_m = np.mean(G[veg_mask])
+    b_m = np.mean(B[veg_mask])
+    bright_m = np.mean(brightness[veg_mask])
+    gb_diff = g_m - b_m
     return {
         "r": r_m, "g": g_m, "b": b_m,
         "brightness": bright_m,
@@ -679,27 +774,27 @@ def classify_species(df: pd.DataFrame,
                      mahoni_ref: Optional[dict] = None) -> pd.DataFrame:
     df = df.copy()
 
-    R = df["r_mean"].values.astype(float)
-    G = df["g_mean"].values.astype(float)
-    B = df["b_mean"].values.astype(float)
+    R = df["r_mean"].values.astype(np.float32)
+    G = df["g_mean"].values.astype(np.float32)
+    B = df["b_mean"].values.astype(np.float32)
     brightness = (R + G + B) / 3.0
     gb_diff = G - B
 
-    df["gb_diff"]   = gb_diff
+    df["gb_diff"] = gb_diff
     df["brightness_px"] = brightness
 
-    default_pinus  = {"gb_diff": -11.0, "brightness": 99.0}
-    default_mahoni = {"gb_diff":  66.0, "brightness": 129.0}
+    default_pinus = {"gb_diff": -11.0, "brightness": 99.0}
+    default_mahoni = {"gb_diff": 66.0, "brightness": 129.0}
 
     if pinus_ref is not None:
         default_pinus.update(pinus_ref)
     if mahoni_ref is not None:
         default_mahoni.update(mahoni_ref)
 
-    ref_p_gb  = default_pinus["gb_diff"]
-    ref_m_gb  = default_mahoni["gb_diff"]
-    ref_p_br  = default_pinus["brightness"]
-    ref_m_br  = default_mahoni["brightness"]
+    ref_p_gb = default_pinus["gb_diff"]
+    ref_m_gb = default_mahoni["gb_diff"]
+    ref_p_br = default_pinus["brightness"]
+    ref_m_br = default_mahoni["brightness"]
 
     w_gb = 2.0
     w_br = 1.0
@@ -714,7 +809,7 @@ def classify_species(df: pd.DataFrame,
     )
 
     total_dist = dist_pinus + dist_mahoni + 1e-6
-    species_list    = []
+    species_list = []
     confidence_list = []
 
     for i in range(len(df)):
@@ -725,10 +820,13 @@ def classify_species(df: pd.DataFrame,
             species_list.append("Swietenia mahagoni")
             confidence_list.append(round((1 - dist_mahoni[i] / total_dist[i]) * 100, 1))
 
-    df["species"]    = species_list
+    df["species"] = species_list
     df["confidence"] = confidence_list
     return df
 
+# ──────────────────────────────────────────────────────────────
+# CARBON COMPUTATION 
+# ──────────────────────────────────────────────────────────────
 def compute_carbon(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     dbh_list, vol_list, bio_list, carbon_list, co2_list, val_list = [], [], [], [], [], []
@@ -738,7 +836,7 @@ def compute_carbon(df: pd.DataFrame) -> pd.DataFrame:
         dbh = max(0.7 * (ECD ** 0.85) * (H ** 0.35), 1.0)
         try:
             ln_v = p["vol_a"] + p["vol_b"] * math.log(H) + p["vol_c"] * math.log(CA + 0.01)
-            vol  = max(math.exp(ln_v), 0.001)
+            vol = max(math.exp(ln_v), 0.001)
         except:
             vol = 0.001
         W = p["allometric_a"] * (p["wood_density"] * dbh ** 2.26)
@@ -753,14 +851,17 @@ def compute_carbon(df: pd.DataFrame) -> pd.DataFrame:
         carbon_list.append(round(C, 2))
         co2_list.append(round(CO2e, 2))
         val_list.append(round(stumpage, 0))
-    df["dbh_cm"]      = dbh_list
-    df["volume_m3"]   = vol_list
-    df["biomass_kg"]  = bio_list
-    df["carbon_kg"]   = carbon_list
-    df["co2e_kg"]     = co2_list
-    df["stumpage_idr"]= val_list
+    df["dbh_cm"] = dbh_list
+    df["volume_m3"] = vol_list
+    df["biomass_kg"] = bio_list
+    df["carbon_kg"] = carbon_list
+    df["co2e_kg"] = co2_list
+    df["stumpage_idr"] = val_list
     return df
 
+# ──────────────────────────────────────────────────────────────
+# MASK R-CNN SIMULATION - OPTIMIZED
+# ──────────────────────────────────────────────────────────────
 def simulate_maskrcnn_detection(rgb: np.ndarray, df_trees: pd.DataFrame,
                                  gsd_m: float = 0.1,
                                  score_threshold: float = 0.5) -> dict:
@@ -774,7 +875,7 @@ def simulate_maskrcnn_detection(rgb: np.ndarray, df_trees: pd.DataFrame,
                 "model": "Mask R-CNN (ResNet-50 FPN Backbone)",
                 "score_threshold": score_threshold}
 
-    radius_px     = np.maximum((df_filtered["ecd_m"].values / 2) / gsd_m, 5).astype(int)
+    radius_px = np.maximum((df_filtered["ecd_m"].values / 2) / gsd_m, 5).astype(int)
     centroids_row = df_filtered["centroid_row"].values.astype(int)
     centroids_col = df_filtered["centroid_col"].values.astype(int)
     y1 = np.maximum(0, centroids_row - radius_px)
@@ -787,7 +888,7 @@ def simulate_maskrcnn_detection(rgb: np.ndarray, df_trees: pd.DataFrame,
         base_scores = df_filtered["confidence"].values / 100.0
     else:
         base_scores = np.ones(len(df_filtered)) * 0.7
-    noise  = rng.uniform(-0.05, 0.05, size=len(df_filtered))
+    noise = rng.uniform(-0.05, 0.05, size=len(df_filtered))
     scores = np.clip(base_scores + noise, 0.5, 0.99)
 
     instances = []
@@ -812,21 +913,21 @@ def simulate_maskrcnn_detection(rgb: np.ndarray, df_trees: pd.DataFrame,
             "species": species,
         }
         instances.append({
-            "id":           int(row["id"]),
-            "species":      species,
-            "score":        float(scores[idx]),
-            "height_m":     row["height_m"],
-            "crown_area_m2":row["crown_area_m2"],
-            "ecd_m":        row["ecd_m"],
-            "carbon_kg":    row.get("carbon_kg", 0),
-            "bbox":         [int(x1[idx]), int(y1[idx]), int(x2[idx]), int(y2[idx])],
-            "centroid":     [int(cx_local), int(cy_local)],
-            "mask_params":  mask_params,
+            "id": int(row["id"]),
+            "species": species,
+            "score": float(scores[idx]),
+            "height_m": row["height_m"],
+            "crown_area_m2": row["crown_area_m2"],
+            "ecd_m": row["ecd_m"],
+            "carbon_kg": row.get("carbon_kg", 0),
+            "bbox": [int(x1[idx]), int(y1[idx]), int(x2[idx]), int(y2[idx])],
+            "centroid": [int(cx_local), int(cy_local)],
+            "mask_params": mask_params,
         })
     return {
-        "instances":       instances,
-        "total":           len(instances),
-        "model":           "Mask R-CNN (ResNet-50 FPN Backbone)",
+        "instances": instances,
+        "total": len(instances),
+        "model": "Mask R-CNN (ResNet-50 FPN Backbone)",
         "score_threshold": score_threshold,
     }
 
@@ -861,17 +962,17 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
                              show_labels: bool = True,
                              max_trees_overlay: int = 500) -> np.ndarray:
     COLOR_MAP = {
-        "Pinus merkusii":     (33, 150, 243),
+        "Pinus merkusii": (33, 150, 243),
         "Swietenia mahagoni": (255, 152, 0),
     }
     MASK_ALPHA = {
-        "Pinus merkusii":     70,
+        "Pinus merkusii": 70,
         "Swietenia mahagoni": 75,
     }
-    BOX_ALPHA  = 200
+    BOX_ALPHA = 200
     LABEL_BG = {
-        "Pinus merkusii":     (21, 101, 192, 200),
-        "Swietenia mahagoni": (230, 81,  0,   200),
+        "Pinus merkusii": (21, 101, 192, 200),
+        "Swietenia mahagoni": (230, 81, 0, 200),
     }
 
     img_pil = Image.fromarray(rgb.astype(np.uint8)).convert("RGBA")
@@ -881,17 +982,17 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
     H_img, W_img = rgb.shape[:2]
 
     for idx, inst in enumerate(instances):
-        sp    = inst["species"]
+        sp = inst["species"]
         color = COLOR_MAP.get(sp, (100, 200, 100))
         r_c, g_c, b_c = color
-        bbox  = inst["bbox"]
+        bbox = inst["bbox"]
         cx, cy_px = inst["centroid"]
         score = inst["score"]
-        h_m   = inst["height_m"]
+        h_m = inst["height_m"]
 
         if show_masks and inst.get("mask_params") is not None:
             params = inst["mask_params"]
-            alpha  = MASK_ALPHA.get(sp, 70)
+            alpha = MASK_ALPHA.get(sp, 70)
             mask_arr = create_irregular_crown_mask(
                 H_img, W_img,
                 params["cy"], params["cx"],
@@ -901,7 +1002,7 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
             mask_rgba = np.zeros((*mask_arr.shape, 4), dtype=np.uint8)
             mask_rgba[mask_arr] = [r_c, g_c, b_c, alpha]
             mask_img = Image.fromarray(mask_rgba, "RGBA")
-            overlay  = Image.alpha_composite(overlay, mask_img)
+            overlay = Image.alpha_composite(overlay, mask_img)
 
         draw = ImageDraw.Draw(overlay)
 
@@ -933,6 +1034,9 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
     result = Image.alpha_composite(img_pil, overlay).convert("RGB")
     return np.array(result)
 
+# ──────────────────────────────────────────────────────────────
+# MAP RENDERING (Plotly only)
+# ──────────────────────────────────────────────────────────────
 BASEMAP_OPTIONS = {
     "OpenStreetMap": {
         "tiles": "open-street-map",
@@ -956,7 +1060,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                      gsd_m: float = 0.1,
                      img_origin_lat: Optional[float] = None,
                      img_origin_lon: Optional[float] = None) -> go.Figure:
-    COLOR_MAP   = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
+    COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
 
     rng = np.random.default_rng(99)
     max_markers = 3000
@@ -977,10 +1081,10 @@ def build_plotly_map(df_trees: pd.DataFrame,
     df_plot["lat"] = lats
     df_plot["lon"] = lons
 
-    bm_info  = BASEMAP_OPTIONS.get(basemap_key, BASEMAP_OPTIONS["OpenStreetMap"])
+    bm_info = BASEMAP_OPTIONS.get(basemap_key, BASEMAP_OPTIONS["OpenStreetMap"])
     px_style = bm_info["tiles"]
 
-    df_plot["emoji"]      = df_plot["species"].apply(lambda s: "🌲" if "Pinus" in s else "🌳")
+    df_plot["emoji"] = df_plot["species"].apply(lambda s: "🌲" if "Pinus" in s else "🌳")
     df_plot["hover_text"] = df_plot.apply(lambda r: (
         f"<b>{r['emoji']} {r['species']}</b><br>"
         f"ID: {int(r['id'])} | Tinggi: {r['height_m']:.1f} m<br>"
@@ -990,15 +1094,15 @@ def build_plotly_map(df_trees: pd.DataFrame,
         f"Confidence: {r.get('confidence',0):.1f}% | G−B: {r.get('gb_diff',0):.1f}"
     ), axis=1)
 
-    ecd_arr    = df_plot["ecd_m"].values.astype(float)
-    ecd_norm   = (ecd_arr - ecd_arr.min()) / (ecd_arr.max() - ecd_arr.min() + 1e-6)
-    marker_sz  = (ecd_norm * 12 + 5).tolist()
+    ecd_arr = df_plot["ecd_m"].values.astype(float)
+    ecd_norm = (ecd_arr - ecd_arr.min()) / (ecd_arr.max() - ecd_arr.min() + 1e-6)
+    marker_sz = (ecd_norm * 12 + 5).tolist()
 
     fig = go.Figure()
 
     for sp in ["Pinus merkusii", "Swietenia mahagoni"]:
-        mask  = df_plot["species"] == sp
-        dfsp  = df_plot[mask]
+        mask = df_plot["species"] == sp
+        dfsp = df_plot[mask]
         color = COLOR_MAP.get(sp, "#4CAF50")
         emoji = "🌲" if "Pinus" in sp else "🌳"
         sizes = [marker_sz[i] for i, m in enumerate(mask) if m]
@@ -1040,27 +1144,32 @@ def build_plotly_map(df_trees: pd.DataFrame,
     )
     return fig
 
+# ──────────────────────────────────────────────────────────────
+# SIDEBAR
+# ──────────────────────────────────────────────────────────────
 def render_sidebar():
     st.sidebar.markdown("## Parameter Analisis")
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
     <div class="upload-warning">
     ⚠️ Batas Upload: <b>{MAX_UPLOAD_SIZE_MB} MB</b> per file<br>
-    <small>Format: <b>GeoTIFF</b> (.tif, .tiff), JPG, PNG</small>
+    <small>Format: <b>GeoTIFF</b> (.tif, .tiff), JPG, PNG</small><br>
+    <small>⚠️ File >200MB akan diproses dengan optimasi memory</small>
     </div>
     """, unsafe_allow_html=True)
     st.sidebar.markdown("### Data Input")
     uploaded_main = st.sidebar.file_uploader(
-        "Foto Udara (GeoTIFF / JPG / PNG)",
+        "Foto Udara (GeoTIFF / JPG / PNG) - Maks 300MB",
         type=["tif", "tiff", "geotiff", "jpg", "jpeg", "png"],
-        help=f"Orthomosaic UAV atau citra satelit. Maks {MAX_UPLOAD_SIZE_MB} MB\n\nGeoTIFF akan mempertahankan informasi koordinat."
+        help=f"Orthomosaic UAV atau citra satelit. Maks {MAX_UPLOAD_SIZE_MB} MB\n\n"
+             f"File besar akan diresize otomatis untuk optimasi."
     )
     st.sidebar.markdown("### Referensi Tajuk Spesies")
     st.sidebar.info(
         "**Pinus**: upload foto tajuk pinus (area yang dilingkari BIRU)\n\n"
         "**Mahoni**: upload foto tajuk mahoni (area yang dilingkari KUNING)"
     )
-    uploaded_pinus  = st.sidebar.file_uploader(
+    uploaded_pinus = st.sidebar.file_uploader(
         "Sampel Pinus (tajuk gelap, biru-ungu)",
         type=["tif", "tiff", "jpg", "jpeg", "png"], key="pinus")
     uploaded_mahoni = st.sidebar.file_uploader(
@@ -1068,27 +1177,31 @@ def render_sidebar():
         type=["tif", "tiff", "jpg", "jpeg", "png"], key="mahoni")
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Deteksi Pohon")
-    gsd      = st.sidebar.slider("GSD (m/pixel)", 0.02, 0.5,  0.10, 0.01,
-                                  help="Ground Sampling Distance - resolusi spasial. Akan diganti dengan nilai dari GeoTIFF jika tersedia.")
-    min_h    = st.sidebar.slider("Tinggi Minimum (m)", 2.0, 15.0, 5.0, 0.5)
-    min_dist = st.sidebar.slider("Jarak Minimum (m)",  1.0, 10.0, 3.0, 0.5)
-    sigma    = st.sidebar.slider("Gaussian Smoothing", 0.5,  5.0, 2.0, 0.5)
+    gsd = st.sidebar.slider("GSD (m/pixel)", 0.02, 0.5, 0.10, 0.01,
+                             help="Ground Sampling Distance - resolusi spasial")
+    min_h = st.sidebar.slider("Tinggi Minimum (m)", 2.0, 15.0, 5.0, 0.5)
+    min_dist = st.sidebar.slider("Jarak Minimum (m)", 1.0, 10.0, 3.0, 0.5)
+    sigma = st.sidebar.slider("Gaussian Smoothing", 0.5, 5.0, 2.0, 0.5)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Optimasi Memory")
+    enable_resize = st.sidebar.checkbox("Resize Otomatis untuk File Besar", value=True,
+                                         help="Meresize gambar >4000px untuk menghemat memory")
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Mask R-CNN")
-    rcnn_score_thresh  = st.sidebar.slider("Score Threshold", 0.3, 0.95, 0.50, 0.05)
-    show_masks_overlay = st.sidebar.checkbox("Tampilkan Masks",         value=True)
-    show_boxes_overlay = st.sidebar.checkbox("Tampilkan Bounding Boxes",value=True)
-    show_labels_overlay= st.sidebar.checkbox("Tampilkan Label",         value=True)
+    rcnn_score_thresh = st.sidebar.slider("Score Threshold", 0.3, 0.95, 0.50, 0.05)
+    show_masks_overlay = st.sidebar.checkbox("Tampilkan Masks", value=True)
+    show_boxes_overlay = st.sidebar.checkbox("Tampilkan Bounding Boxes", value=True)
+    show_labels_overlay = st.sidebar.checkbox("Tampilkan Label", value=True)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Valuasi Karbon")
     carbon_price = st.sidebar.number_input("Harga Karbon (USD/ton CO2e)", 1.0, 50.0, 6.0, 0.5)
-    usd_idr      = st.sidebar.number_input("Kurs USD → IDR", 10000, 20000, 16000, 100)
+    usd_idr = st.sidebar.number_input("Kurs USD → IDR", 10000, 20000, 16000, 100)
     st.sidebar.markdown("### Area Penelitian")
     area_ha = st.sidebar.number_input("Luas Kawasan (ha)", 1.0, 600.0, 53.0, 1.0)
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Koordinat Peta")
-    map_lat  = st.sidebar.number_input("Latitude Pusat",  -90.0,  90.0, UB_FOREST_LAT, 0.0001, format="%.6f")
-    map_lon  = st.sidebar.number_input("Longitude Pusat",-180.0, 180.0, UB_FOREST_LON, 0.0001, format="%.6f")
+    map_lat = st.sidebar.number_input("Latitude Pusat", -90.0, 90.0, UB_FOREST_LAT, 0.0001, format="%.6f")
+    map_lon = st.sidebar.number_input("Longitude Pusat", -180.0, 180.0, UB_FOREST_LON, 0.0001, format="%.6f")
     map_zoom = st.sidebar.slider("Zoom Level", 10, 20, UB_FOREST_ZOOM)
     return {
         "uploaded_main": uploaded_main,
@@ -1101,16 +1214,19 @@ def render_sidebar():
         "show_labels": show_labels_overlay,
         "carbon_price": carbon_price, "usd_idr": usd_idr, "area_ha": area_ha,
         "map_lat": map_lat, "map_lon": map_lon, "map_zoom": map_zoom,
+        "enable_resize": enable_resize,
     }
 
+# ──────────────────────────────────────────────────────────────
 # MAIN APP
+# ──────────────────────────────────────────────────────────────
 def main():
     st.markdown("""
     <div class="main-header">
         <h1>🌲 Deteksi Pohon & Estimasi Karbon</h1>
         <p>Estimasi Volume dan Nilai Simpanan Karbon Tegakan <i>Pinus merkusii</i>
         dan <i>Swietenia mahagoni</i> Menggunakan UAV</p>
-        <p><small>Credit: Dr. Adipandang Yudono (Dept. Perencanaan Wilayah & Kota - Universitas Brawijaya) | Ananda Nibras Naditya Lokiko (Prodi Kehutanan - Universitas Brawijaya)</small></p>
+        <p><small>Credit: Dr. Adipandang Yudono | Ananda Nibras Naditya Lokiko</small></p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1119,15 +1235,11 @@ def main():
     # Status library
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Status Library:**")
-    st.sidebar.markdown(f"- rasterio: {'✅' if HAS_RASTERIO else '❌ (install: rasterio)'}")
-    st.sidebar.markdown(f"- tifffile: {'✅' if HAS_TIFFFILE else '❌ (opsional)'}")
+    st.sidebar.markdown(f"- rasterio: {'✅' if HAS_RASTERIO else '❌'}")
+    st.sidebar.markdown(f"- tifffile: {'✅' if HAS_TIFFFILE else '❌'}")
     st.sidebar.markdown(f"- scipy: {'✅' if HAS_SCIPY else '⚠️ (fallback)'}")
     st.sidebar.markdown(f"- skimage: {'✅' if HAS_SKIMAGE else '⚠️ (fallback)'}")
     
-    if not HAS_RASTERIO:
-        st.sidebar.warning("⚠️ rasterio tidak terinstall. Install dengan: pip install rasterio")
-        st.sidebar.info("💡 Untuk file GeoTIFF, akan dicoba dengan tifffile sebagai alternatif.")
-
     tabs = st.tabs([
         "Panduan", "Deteksi Pohon", "Visualisasi Mask R-CNN",
         "Peta Distribusi", "Analisis Karbon", "Spesies", "Ekspor",
@@ -1143,17 +1255,18 @@ def main():
    - **Format gambar biasa** (JPG, PNG)
    - Maksimal ukuran: **{MAX_UPLOAD_SIZE_MB} MB**
 
-2. *(Opsional)* Upload foto sampel tajuk Pinus dan Mahoni untuk klasifikasi yang lebih akurat
+2. **Optimasi untuk File Besar (>200MB):**
+   - File akan otomatis diresize untuk menghemat memory
+   - Proses mungkin memerlukan waktu 2-5 menit
+   - Pastikan koneksi internet stabil
 
-3. Atur parameter deteksi di sidebar
+3. *(Opsional)* Upload foto sampel tajuk Pinus dan Mahoni
 
-4. Tab **Deteksi Pohon** → klik **Jalankan Deteksi**
+4. Atur parameter deteksi di sidebar
 
-5. Lihat hasil di tab lainnya
+5. Tab **Deteksi Pohon** → klik **Jalankan Deteksi**
 
-**Catatan Klasifikasi Spesies:**
-- **Pinus merkusii** 🌲: tajuk gelap, biru-ungu (G–B < 0, brightness < 110)
-- **Swietenia mahagoni** 🌳: tajuk terang, kuning-hijau (G–B > 40, brightness > 120)
+6. Lihat hasil di tab lainnya
         """)
 
     # TAB 1: DETEKSI POHON
@@ -1163,7 +1276,7 @@ def main():
             st.info("📁 Upload foto udara (GeoTIFF/JPG/PNG) di sidebar kiri untuk memulai analisis.")
             return
 
-        with st.spinner("📂 Memuat gambar..."):
+        with st.spinner("📂 Memuat gambar (ini mungkin memerlukan waktu untuk file besar)..."):
             rgb, meta = load_image_array(params["uploaded_main"])
         if rgb is None:
             st.warning("❌ Gambar tidak dapat dimuat. Pastikan file valid.")
@@ -1180,17 +1293,11 @@ def main():
         with col4:
             if meta.get("gsd_m"):
                 st.metric("GSD dari File", f"{meta['gsd_m']:.4f} m/px")
-                # Gunakan GSD dari file
-                params["gsd"] = meta["gsd_m"]
             else:
                 st.metric("GSD (Setting)", f"{params['gsd']} m/px")
 
-        # Tampilkan info geospasial jika ada
-        if meta.get("crs"):
-            st.info(f"📍 Sistem Koordinat: {meta['crs']}")
-        if meta.get("bounds"):
-            bounds = meta['bounds']
-            st.info(f"🗺️ Batas Geografis: Lng {bounds[0]:.5f} → {bounds[2]:.5f}, Lat {bounds[1]:.5f} → {bounds[3]:.5f}")
+        if meta.get("original_size"):
+            st.info(f"📏 Original size: {meta['original_size'][0]}×{meta['original_size'][1]} px → Resized to: {meta['resized_to'][0]}×{meta['resized_to'][1]} px")
 
         st.markdown("### Preview Foto Udara")
         preview = Image.fromarray(rgb)
@@ -1203,53 +1310,58 @@ def main():
             t0 = time.time()
             gsd = params["gsd"]
             
-            # Gunakan GSD dari file jika tersedia
             if meta.get("gsd_m"):
                 gsd = meta["gsd_m"]
-                st.info(f"📏 Menggunakan GSD dari file GeoTIFF: {gsd:.4f} m/pixel")
+                st.info(f"📏 Menggunakan GSD dari file: {gsd:.4f} m/pixel")
             
             min_dist_px = max(int(params["min_dist"] / gsd), 10)
             prog = st.progress(0, "Memulai analisis...")
 
+            st.info("🔄 Membangun CHM (Canopy Height Model)...")
             chm = rgb_to_simulated_chm(rgb, sigma=params["sigma"], gsd_m=gsd)
             prog.progress(20, "CHM selesai dibangun...")
 
+            st.info("🔍 Mendeteksi puncak pohon...")
             labels, peaks = detect_trees(chm, params["min_h"], min_dist_px, gsd)
-            prog.progress(45, "Deteksi puncak pohon selesai...")
+            prog.progress(45, f"Deteksi puncak pohon selesai. {len(peaks)} kandidat ditemukan...")
 
+            st.info("📊 Mengekstraksi metrik pohon...")
             df_trees = extract_tree_metrics(labels, peaks, chm, rgb, gsd)
-            prog.progress(65, "Ekstraksi metrik selesai...")
+            prog.progress(65, f"Ekstraksi metrik selesai. {len(df_trees)} pohon tervalidasi...")
 
             # Sampel referensi dari upload
-            pinus_ref  = None
+            pinus_ref = None
             mahoni_ref = None
             if params["uploaded_pinus"]:
+                st.info("📸 Memproses sampel Pinus...")
                 pinus_arr = load_sample_image(params["uploaded_pinus"], "Sampel Pinus")
                 if pinus_arr is not None:
                     pinus_ref = _extract_spectral_ref(pinus_arr)
-                    st.success(
-                        f"✅ Pinus ref: R={pinus_ref['r']:.0f} G={pinus_ref['g']:.0f} "
-                        f"B={pinus_ref['b']:.0f} | G-B={pinus_ref['gb_diff']:.1f}"
-                    )
+                    st.success(f"✅ Pinus ref: G-B={pinus_ref['gb_diff']:.1f}")
             if params["uploaded_mahoni"]:
+                st.info("📸 Memproses sampel Mahoni...")
                 mahoni_arr = load_sample_image(params["uploaded_mahoni"], "Sampel Mahoni")
                 if mahoni_arr is not None:
                     mahoni_ref = _extract_spectral_ref(mahoni_arr)
-                    st.success(
-                        f"✅ Mahoni ref: R={mahoni_ref['r']:.0f} G={mahoni_ref['g']:.0f} "
-                        f"B={mahoni_ref['b']:.0f} | G-B={mahoni_ref['gb_diff']:.1f}"
-                    )
+                    st.success(f"✅ Mahoni ref: G-B={mahoni_ref['gb_diff']:.1f}")
 
+            st.info("🏷️ Mengklasifikasi spesies...")
             df_trees = classify_species(df_trees, pinus_ref, mahoni_ref)
+            
+            st.info("💰 Menghitung estimasi karbon...")
             df_trees = compute_carbon(df_trees)
             prog.progress(90, "Komputasi karbon selesai...")
 
             st.session_state["tree_df"] = df_trees
-            st.session_state["rgb"]     = rgb
-            st.session_state["chm"]     = chm
-            st.session_state["meta"]    = meta
-            st.session_state["gsd"]     = gsd
+            st.session_state["rgb"] = rgb
+            st.session_state["chm"] = chm
+            st.session_state["meta"] = meta
+            st.session_state["gsd"] = gsd
             prog.progress(100, "Deteksi selesai!")
+
+            # Bersihkan memory
+            del chm, labels, peaks
+            gc.collect()
 
             elapsed = time.time() - t0
             st.success(f"✅ Deteksi selesai! {len(df_trees):,} pohon terdeteksi dalam {elapsed:.1f} detik.")
@@ -1282,7 +1394,7 @@ def main():
                 use_container_width=True,
             )
 
-    # TAB 2-6 (sama seperti sebelumnya - disederhanakan untuk panjang response)
+    # TAB 2: MASK R-CNN
     with tabs[2]:
         st.markdown("## Visualisasi Mask R-CNN")
         if "tree_df" not in st.session_state:
@@ -1305,8 +1417,13 @@ def main():
             score_thresh = params["rcnn_score_thresh"]
             
             with st.spinner("Menjalankan Mask R-CNN..."):
+                t0 = time.time()
                 detection = simulate_maskrcnn_detection(rgb, df, gsd_m=gsd, score_threshold=score_thresh)
+                elapsed = time.time() - t0
+                
                 overlay_arr = render_maskrcnn_overlay(rgb, detection, show_masks, show_boxes, show_labels, int(max_overlay))
+            
+            st.success(f"✅ Selesai dalam {elapsed:.2f} detik. {detection['total']} instance terdeteksi.")
             
             col_i1, col_i2 = st.columns(2)
             def make_preview(arr, max_w=600):
@@ -1317,99 +1434,132 @@ def main():
                 return img
             
             with col_i1:
+                st.markdown("**Foto Udara Asli**")
                 st.image(make_preview(rgb), use_container_width=True)
             with col_i2:
+                st.markdown("**Overlay Mask R-CNN**")
                 st.image(make_preview(overlay_arr), use_container_width=True)
             
             buf_overlay = io.BytesIO()
             Image.fromarray(overlay_arr).save(buf_overlay, format="PNG")
             st.download_button("⬇ Download Overlay (PNG)", buf_overlay.getvalue(), "mask_rcnn_overlay.png", "image/png")
 
+    # TAB 3: PETA DISTRIBUSI
     with tabs[3]:
         st.markdown("## Peta Distribusi")
-        if "tree_df" in st.session_state:
+        if "tree_df" not in st.session_state:
+            st.info("Jalankan deteksi pohon terlebih dahulu.")
+        else:
             df = st.session_state["tree_df"]
             meta = st.session_state.get("meta", {})
             gsd = st.session_state.get("gsd", params["gsd"])
             
             basemap_choice = st.radio("Basemap:", options=list(BASEMAP_OPTIONS.keys()), horizontal=True)
+            filter_species = st.multiselect(
+                "Filter Spesies:",
+                options=["Pinus merkusii", "Swietenia mahagoni"],
+                default=["Pinus merkusii", "Swietenia mahagoni"],
+            )
             
-            # Gunakan bounds dari GeoTIFF jika ada
+            df_map = df[df["species"].isin(filter_species)].copy() if filter_species else df.copy()
+            
             center_lat, center_lon = params["map_lat"], params["map_lon"]
             img_origin_lat, img_origin_lon = None, None
             
             if meta.get("bounds"):
                 bounds = meta["bounds"]
-                center_lat = (bounds[1] + bounds[3]) / 2
-                center_lon = (bounds[0] + bounds[2]) / 2
-                img_origin_lat = bounds[3]
-                img_origin_lon = bounds[0]
-                st.info(f"📍 Menggunakan koordinat dari GeoTIFF")
+                if isinstance(bounds, tuple) and len(bounds) == 4:
+                    center_lat = (bounds[1] + bounds[3]) / 2
+                    center_lon = (bounds[0] + bounds[2]) / 2
+                    img_origin_lat = bounds[3]
+                    img_origin_lon = bounds[0]
+                    st.info(f"📍 Menggunakan koordinat dari GeoTIFF")
             
-            fig = build_plotly_map(df, basemap_choice, center_lat, center_lon, 
-                                   params["map_zoom"], gsd, img_origin_lat, img_origin_lon)
+            with st.spinner("Membangun peta..."):
+                fig = build_plotly_map(df_map, basemap_choice, center_lat, center_lon, 
+                                       params["map_zoom"], gsd, img_origin_lat, img_origin_lon)
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Jalankan deteksi pohon terlebih dahulu.")
+            
+            sp_grp = df_map.groupby("species").agg(
+                Jumlah=("id", "count"),
+                Karbon_ton=("carbon_kg", lambda x: x.sum() / 1000),
+                CO2e_ton=("co2e_kg", lambda x: x.sum() / 1000),
+            ).round(3)
+            st.dataframe(sp_grp, use_container_width=True)
 
+    # TAB 4: ANALISIS KARBON
     with tabs[4]:
         if "tree_df" in st.session_state:
             df = st.session_state["tree_df"]
             total_C = df["carbon_kg"].sum() / 1000
             total_CO2 = df["co2e_kg"].sum() / 1000
+            total_vol = df["volume_m3"].sum()
             
             col1, col2, col3 = st.columns(3)
             col1.metric("Total Karbon", f"{total_C:.2f} ton C")
             col2.metric("Total CO₂e", f"{total_CO2:.2f} ton")
-            col3.metric("Total Pohon", f"{len(df):,}")
+            col3.metric("Total Volume", f"{total_vol:.2f} m³")
             
-            carbon_value = total_CO2 * params["carbon_price"] * params["usd_idr"]
-            st.metric("Nilai Karbon (IDR)", f"Rp {carbon_value:,.0f}")
+            carbon_value_usd = total_CO2 * params["carbon_price"]
+            carbon_value_idr = carbon_value_usd * params["usd_idr"]
+            col1, col2 = st.columns(2)
+            col1.metric("Nilai Karbon (USD)", f"${carbon_value_usd:,.2f}")
+            col2.metric("Nilai Karbon (IDR)", f"Rp {carbon_value_idr:,.0f}")
             
-            # Grafik per spesies
-            sp_sum = df.groupby("species").agg({"id": "count", "carbon_kg": "sum"}).round(2)
-            sp_sum.columns = ["Jumlah Pohon", "Karbon (kg)"]
+            sp_sum = df.groupby("species").agg({
+                "id": "count", "carbon_kg": "sum", "co2e_kg": "sum", "volume_m3": "sum"
+            }).rename(columns={"id": "Jumlah Pohon", "carbon_kg": "Karbon (kg)",
+                                "co2e_kg": "CO2e (kg)", "volume_m3": "Volume (m³)"})
+            sp_sum["Karbon (ton)"] = sp_sum["Karbon (kg)"] / 1000
+            sp_sum["CO2e (ton)"] = sp_sum["CO2e (kg)"] / 1000
             st.dataframe(sp_sum, use_container_width=True)
+            
+            fig = make_subplots(rows=1, cols=2,
+                                subplot_titles=("Jumlah Pohon per Spesies", "Total Karbon (ton)"))
+            sp_cnt = df["species"].value_counts()
+            sp_c = df.groupby("species")["carbon_kg"].sum() / 1000
+            colors = ["#2196F3" if "Pinus" in s else "#FF9800" for s in sp_cnt.index]
+            fig.add_trace(go.Bar(x=sp_cnt.index, y=sp_cnt.values,
+                                 marker_color=colors, name="Jumlah"), row=1, col=1)
+            colors2 = ["#2196F3" if "Pinus" in s else "#FF9800" for s in sp_c.index]
+            fig.add_trace(go.Bar(x=sp_c.index, y=sp_c.values,
+                                 marker_color=colors2, name="Karbon"), row=1, col=2)
+            fig.update_layout(height=400, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("Jalankan deteksi pohon terlebih dahulu.")
 
+    # TAB 5: SPESIES
     with tabs[5]:
         st.markdown("## Parameter Spesies")
         for sp, p in SPECIES_PARAMS.items():
-            with st.expander(f"{p['emoji']} {sp}"):
-                st.markdown(f"**Deskripsi:** {p['description']}")
-                st.markdown(f"**Berat Jenis:** {p['wood_density']} g/cm³")
-                st.markdown(f"**Fraksi Karbon:** {p['carbon_fraction']}")
-                st.markdown(f"**Referensi Spektral:** G-B = {p['gb_diff_ref']}, Brightness = {p['brightness_ref']}")
+            with st.expander(f"{p['emoji']} {sp} – {p['description']}"):
+                col1, col2, col3 = st.columns(3)
+                col1.markdown(f"**Parameter Biometrik**\n- Berat Jenis: {p['wood_density']} g/cm³\n"
+                            f"- BEF: {p['bef']}\n- Fraksi Karbon: {p['carbon_fraction']}")
+                col2.markdown(f"**Model Volume**\n- a = {p['vol_a']}\n"
+                            f"- b (H) = {p['vol_b']}\n- c (CA) = {p['vol_c']}")
+                col3.markdown(f"**Spektral (UAV)**\n- G−B ref: {p['gb_diff_ref']}\n"
+                            f"- Brightness ref: {p['brightness_ref']}\n"
+                            f"- R/G/B ref: {p['ref_r']:.0f}/{p['ref_g']:.0f}/{p['ref_b']:.0f}")
 
+    # TAB 6: EKSPOR
     with tabs[6]:
         if "tree_df" in st.session_state:
             df = st.session_state["tree_df"]
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("⬇ Download CSV", csv, "hasil_deteksi.csv", "text/csv", use_container_width=True)
+            st.markdown("### Ekspor Data")
             
-            # Export GeoJSON
-            if st.button("Export ke GeoJSON"):
-                features = []
-                for _, row in df.iterrows():
-                    feature = {
-                        "type": "Feature",
-                        "geometry": {
-                            "type": "Point",
-                            "coordinates": [row.get("lon", 0), row.get("lat", 0)]
-                        },
-                        "properties": {
-                            "id": int(row["id"]),
-                            "species": row["species"],
-                            "height_m": float(row["height_m"]),
-                            "carbon_kg": float(row["carbon_kg"])
-                        }
-                    }
-                    features.append(feature)
-                geojson = {"type": "FeatureCollection", "features": features}
-                st.download_button("⬇ Download GeoJSON", json.dumps(geojson), "hasil.geojson", "application/json")
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇ Download CSV (Data Lengkap)", csv,
+                               "ub_forest_hasil_deteksi.csv", "text/csv",
+                               use_container_width=True)
+            
+            if "meta" in st.session_state and st.session_state["meta"].get("file_size_display"):
+                st.info(f"📊 File yang diproses: {st.session_state['meta']['file_size_display']}")
+                st.info(f"🌲 Total pohon: {len(df):,}")
+                st.info(f"💰 Total karbon: {df['carbon_kg'].sum() / 1000:.2f} ton C")
         else:
-            st.info("Jalankan deteksi pohon terlebih dahulu.")
+            st.info("Jalankan deteksi pohon terlebih dahulu untuk mengekspor data.")
 
 
 if __name__ == "__main__":
