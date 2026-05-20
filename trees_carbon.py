@@ -101,7 +101,7 @@ def convert_utm_to_wgs84(x: float, y: float, utm_epsg: str) -> Tuple[Optional[fl
 warnings.filterwarnings("ignore")
 
 st.set_page_config(
-    page_title="UB Forest – Deteksi & Karbon",
+    page_title="Deteksi Pohon & Kalkulasi Karbon",
     page_icon="🌲",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1055,8 +1055,8 @@ BASEMAP_OPTIONS = {
 
 def build_plotly_map(df_trees: pd.DataFrame,
                      basemap_key: str,
-                     center_lat: float = UB_FOREST_LAT,
-                     center_lon: float = UB_FOREST_LON,
+                     center_lat: float = HUTAN_LAT,
+                     center_lon: float = HUTAN_LON,
                      zoom: int = 14,
                      gsd_m: float = 0.1,
                      img_origin_lat: Optional[float] = None,
@@ -1299,9 +1299,9 @@ def render_sidebar() -> dict:
         "**Mahoni**: upload foto tajuk mahoni"
     )
     uploaded_pinus  = st.sidebar.file_uploader(
-        "Sampel Pinus (tajuk gelap)", type=["tif","tiff","jpg","jpeg","png"], key="pinus")
+        "Sampel Pinus", type=["tif","tiff","jpg","jpeg","png"], key="pinus")
     uploaded_mahoni = st.sidebar.file_uploader(
-        "Sampel Mahoni (tajuk terang)", type=["tif","tiff","jpg","jpeg","png"], key="mahoni")
+        "Sampel Mahoni", type=["tif","tiff","jpg","jpeg","png"], key="mahoni")
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Deteksi Pohon")
@@ -1325,9 +1325,9 @@ def render_sidebar() -> dict:
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Koordinat Peta")
-    map_lat  = st.sidebar.number_input("Latitude Pusat",  -90.0,  90.0, UB_FOREST_LAT, 0.0001, format="%.6f")
-    map_lon  = st.sidebar.number_input("Longitude Pusat",-180.0, 180.0, UB_FOREST_LON, 0.0001, format="%.6f")
-    map_zoom = st.sidebar.slider("Zoom Level", 10, 20, UB_FOREST_ZOOM)
+    map_lat  = st.sidebar.number_input("Latitude Pusat",  -90.0,  90.0, HUTAN_LAT, 0.0001, format="%.6f")
+    map_lon  = st.sidebar.number_input("Longitude Pusat",-180.0, 180.0, HUTAN_LON, 0.0001, format="%.6f")
+    map_zoom = st.sidebar.slider("Zoom Level", 10, 20, HUTAN_ZOOM)
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Status Library:**")
@@ -1358,9 +1358,9 @@ def main():
     <p>Estimasi Volume dan Nilai Simpanan Karbon Tegakan
     <i>Pinus merkusii</i> dan <i>Swietenia mahagoni</i> Menggunakan UAV</p>
     <p><span class="badge">🛸 UAV Remote Sensing</span>
-       <span class="badge">🌿 UB Forest</span>
+       <span class="badge">🌿 Forest</span>
        <span class="badge">📡 Mask R-CNN</span></p>
-    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB) | Ananda Nibras Naditya Lokiko (Data Analyst - Kehutanan UB)</small></p>
+    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB) | Ananda Nibras Naditya Lokiko (Spatial Forestry Analyst - Kehutanan UB)</small></p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1898,7 +1898,7 @@ def main():
             st.download_button(
                 "⬇ Download GeoJSON (Titik Pohon)",
                 geojson_bytes,
-                "ub_forest_pohon.geojson",
+                "hutan_pohon.geojson",
                 "application/geo+json",
                 use_container_width=True,
             )
@@ -1907,7 +1907,7 @@ def main():
                 st.download_button(
                     "⬇ Download GeoJSON (Titik + Tajuk Pohon)",
                     geojson_bytes,
-                    "ub_forest_pohon_dengan_tajuk.geojson",
+                    "hutan_pohon_dengan_tajuk.geojson",
                     "application/geo+json",
                     use_container_width=True,
                 )
@@ -1930,7 +1930,7 @@ def main():
 
 **Leaflet / Mapbox (Web):**
 ```javascript
-fetch('ub_forest_pohon.geojson')
+fetch('hutan_pohon.geojson')
   .then(r => r.json())
   .then(data => L.geoJSON(data).addTo(map));
 
