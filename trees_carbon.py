@@ -1073,15 +1073,61 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
 
 
 # ══════════════════════════════════════════════════════════════
-# MAP
+# MAP - DENGAN BASEMAP LENGKAP (OpenStreetMap, Satellite, Terrain)
 # ══════════════════════════════════════════════════════════════
 
-# Basemap styles yang TIDAK memerlukan Mapbox token
-# (gunakan go.Scattermap bukan go.Scattermapbox)
-BASEMAP_OPTIONS = {
-    "OpenStreetMap":   "open-street-map",
-    "Carto Positron":  "carto-positron",
-    "Carto Dark":      "carto-darkmatter",
+# Basemap styles yang tersedia
+# Untuk go.Scattermap (Plotly >=5.24)
+BASEMAP_STYLES = {
+    "OpenStreetMap": {
+        "style": "open-street-map",
+        "description": "Peta jalan standar OpenStreetMap"
+    },
+    "Satellite Imagery": {
+        "style": "satellite",
+        "description": "Citra satelit (memerlukan koneksi internet)"
+    },
+    "Satellite Streets": {
+        "style": "satellite-streets",
+        "description": "Citra satelit dengan overlay jalan"
+    },
+    "Terrain": {
+        "style": "terrain",
+        "description": "Peta kontur dan elevasi"
+    },
+    "Light": {
+        "style": "light",
+        "description": "Tema terang minimalis"
+    },
+    "Dark": {
+        "style": "dark",
+        "description": "Tema gelap untuk malam hari"
+    },
+    "Outdoors": {
+        "style": "outdoors",
+        "description": "Peta outdoor dengan detail alam"
+    },
+    "Carto Positron": {
+        "style": "carto-positron",
+        "description": "Peta bersih gaya CartoDB"
+    },
+    "Carto Dark": {
+        "style": "carto-darkmatter",
+        "description": "Peta gelap gaya CartoDB"
+    }
+}
+
+# Fallback untuk versi Plotly lama (menggunakan mapbox)
+BASEMAP_STYLES_FALLBACK = {
+    "OpenStreetMap": "open-street-map",
+    "Satellite Imagery": "satellite",
+    "Satellite Streets": "satellite-streets",
+    "Terrain": "terrain",
+    "Light": "light",
+    "Dark": "dark",
+    "Outdoors": "outdoors",
+    "Carto Positron": "carto-positron",
+    "Carto Dark": "carto-darkmatter"
 }
 
 def build_plotly_map(df_trees: pd.DataFrame,
@@ -1094,16 +1140,12 @@ def build_plotly_map(df_trees: pd.DataFrame,
                      img_origin_lon: Optional[float] = None,
                      meta: Optional[dict] = None) -> go.Figure:
     """
-    Membangun peta distribusi pohon dengan konversi UTM ke WGS84.
+    Membangun peta distribusi pohon dengan berbagai pilihan basemap.
     """
     COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
     rng       = np.random.default_rng(99)
     
-    # Debug info
-    st.write(f"Debug: Total pohon sebelum filter: {len(df_trees)}")
-    
     df_plot = df_trees.head(3000).copy()
-    st.write(f"Debug: Total pohon setelah limit: {len(df_plot)}")
     
     if df_plot.empty:
         st.warning("Tidak ada data pohon untuk ditampilkan")
@@ -1118,99 +1160,69 @@ def build_plotly_map(df_trees: pd.DataFrame,
     utm_bounds = None
     
     if meta:
-        st.write(f"Debug: Metadata tersedia - CRS: {str(meta.get('crs', 'Tidak ada'))[:200]}...")
-        st.write(f"Debug: Bounds: {meta.get('bounds', 'Tidak ada')}")
-        
-        # Coba ekstrak UTM
         try:
             utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
             if utm_epsg and utm_bounds:
                 has_utm = True
-                st.success(f"✅ Deteksi UTM: {utm_epsg}")
-                st.write(f"Debug: UTM Bounds: {utm_bounds}")
-            else:
-                st.info("ℹ️ Tidak mendeteksi sistem koordinat UTM, menggunakan metode fallback")
-        except Exception as e:
-            st.warning(f"Error ekstraksi UTM: {str(e)[:100]}")
+        except Exception:
+            pass
     
     # Hitung koordinat untuk setiap pohon
-    error_count = 0
-    success_count = 0
-    
     for idx, row in df_plot.iterrows():
         try:
             if has_utm and utm_epsg and utm_bounds:
                 # Konversi UTM ke WGS84
                 minx, miny, maxx, maxy = utm_bounds
                 
-                # Dapatkan ukuran asli dan resize
                 if meta.get("original_size"):
                     orig_h, orig_w = meta["original_size"]
                     resized_h, resized_w = meta.get("resized_to", (orig_h, orig_w))
                     
-                    # Hitung faktor skala
                     scale_h = orig_h / resized_h if resized_h > 0 else 1
                     scale_w = orig_w / resized_w if resized_w > 0 else 1
                     
-                    # Koordinat piksel dalam citra asli
                     px = float(row["centroid_col"]) * scale_w
                     py = float(row["centroid_row"]) * scale_h
                     
-                    # Konversi piksel ke koordinat UTM
                     x_utm = minx + (px / orig_w) * (maxx - minx)
-                    y_utm = maxy - (py / orig_h) * (maxy - miny)  # Invers Y karena gambar
+                    y_utm = maxy - (py / orig_h) * (maxy - miny)
                     
-                    # Konversi UTM ke WGS84
                     lon, lat = convert_utm_to_wgs84(x_utm, y_utm, utm_epsg)
                     
                     if lon is not None and lat is not None:
                         lats.append(lat)
                         lons.append(lon)
-                        success_count += 1
                     else:
-                        # Fallback ke metode sederhana
-                        lat = center_lat + rng.uniform(-0.0005, 0.0005)
-                        lon = center_lon + rng.uniform(-0.0005, 0.0005)
-                        lats.append(lat)
-                        lons.append(lon)
-                        error_count += 1
+                        # Fallback
+                        angle = rng.uniform(0, 2 * math.pi)
+                        radius = rng.uniform(0, 0.002)
+                        lats.append(center_lat + radius * math.cos(angle))
+                        lons.append(center_lon + radius * math.sin(angle))
                 else:
-                    # Fallback
-                    lat = center_lat + rng.uniform(-0.0005, 0.0005)
-                    lon = center_lon + rng.uniform(-0.0005, 0.0005)
-                    lats.append(lat)
-                    lons.append(lon)
-                    error_count += 1
+                    angle = rng.uniform(0, 2 * math.pi)
+                    radius = rng.uniform(0, 0.002)
+                    lats.append(center_lat + radius * math.cos(angle))
+                    lons.append(center_lon + radius * math.sin(angle))
             else:
-                # Metode sederhana berdasarkan GSD
+                # Metode sederhana
                 if img_origin_lat is not None and img_origin_lon is not None:
-                    # Konversi piksel ke koordinat geografis
                     lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111320.0
                     lon = img_origin_lon + float(row["centroid_col"]) * gsd_m / (111320.0 * math.cos(math.radians(img_origin_lat)))
                 else:
-                    # Spread pohon di sekitar center (untuk visualisasi)
                     angle = rng.uniform(0, 2 * math.pi)
-                    radius = rng.uniform(0, 0.003)  # ~300 meter radius
+                    radius = rng.uniform(0, 0.002)
                     lat = center_lat + radius * math.cos(angle)
                     lon = center_lon + radius * math.sin(angle)
                 
                 lats.append(lat)
                 lons.append(lon)
-                success_count += 1
                 
-        except Exception as e:
-            st.warning(f"Error pada pohon {idx}: {str(e)[:50]}")
+        except Exception:
             # Fallback ke center
-            lat = center_lat + rng.uniform(-0.0005, 0.0005)
-            lon = center_lon + rng.uniform(-0.0005, 0.0005)
-            lats.append(lat)
-            lons.append(lon)
-            error_count += 1
-    
-    if success_count > 0:
-        st.success(f"✅ Berhasil menghitung koordinat untuk {success_count} pohon")
-    if error_count > 0:
-        st.info(f"ℹ️ {error_count} pohon menggunakan koordinat fallback")
+            angle = rng.uniform(0, 2 * math.pi)
+            radius = rng.uniform(0, 0.002)
+            lats.append(center_lat + radius * math.cos(angle))
+            lons.append(center_lon + radius * math.sin(angle))
     
     # Tambahkan koordinat ke dataframe
     df_plot = df_plot.copy()
@@ -1220,7 +1232,6 @@ def build_plotly_map(df_trees: pd.DataFrame,
     # Validasi koordinat
     valid_coords = df_plot["lat"].notna() & df_plot["lon"].notna()
     df_plot = df_plot[valid_coords]
-    st.write(f"Debug: {len(df_plot)} pohon dengan koordinat valid")
     
     if df_plot.empty:
         st.error("Tidak ada koordinat valid untuk ditampilkan")
@@ -1246,8 +1257,10 @@ def build_plotly_map(df_trees: pd.DataFrame,
         norm = np.ones_like(ecd) * 0.5
     sizes = (norm * 14 + 8).tolist()
     
-    # Style peta
-    px_style = BASEMAP_OPTIONS.get(basemap_key, "open-street-map")
+    # Dapatkan style basemap
+    basemap_info = BASEMAP_STYLES.get(basemap_key, BASEMAP_STYLES["OpenStreetMap"])
+    map_style = basemap_info["style"]
+    
     fig = go.Figure()
     
     # Cek versi Plotly
@@ -1275,14 +1288,17 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 marker=go.scattermap.Marker(
                     size=szs,
                     color=color,
-                    opacity=0.8,
+                    opacity=0.85,
                     sizemode="diameter",
+                    symbol="circle",
                 ),
                 name=label,
                 text=dsp["hover"].tolist(),
                 hovertemplate="%{text}<extra></extra>",
             ))
         else:
+            # Fallback untuk versi lama
+            fallback_style = BASEMAP_STYLES_FALLBACK.get(basemap_key, "open-street-map")
             fig.add_trace(go.Scattermapbox(
                 lat=dsp["lat"].tolist(),
                 lon=dsp["lon"].tolist(),
@@ -1290,13 +1306,14 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 marker=go.scattermapbox.Marker(
                     size=szs,
                     color=color,
-                    opacity=0.8,
+                    opacity=0.85,
                     sizemode="diameter",
                 ),
                 name=label,
                 text=dsp["hover"].tolist(),
                 hovertemplate="%{text}<extra></extra>",
             ))
+            map_style = fallback_style
     
     # Hitung center dari data
     if len(df_plot) > 0:
@@ -1308,17 +1325,24 @@ def build_plotly_map(df_trees: pd.DataFrame,
     
     # Konfigurasi layout
     map_center = dict(lat=map_center_lat, lon=map_center_lon)
-    map_zoom = max(zoom - 1, 12)
+    map_zoom = zoom
     
     if use_new_api:
+        # Konfigurasi untuk API baru
+        map_config = dict(
+            style=map_style,
+            center=map_center,
+            zoom=map_zoom,
+        )
+        
+        # Tambahkan kontrol peta
+        map_config["bearing"] = 0
+        map_config["pitch"] = 0
+        
         fig.update_layout(
-            map=dict(
-                style=px_style,
-                center=map_center,
-                zoom=map_zoom,
-            ),
-            margin=dict(l=0, r=0, t=30, b=0),
-            height=600,
+            map=map_config,
+            margin=dict(l=0, r=0, t=40, b=0),
+            height=650,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
                 bordercolor="#ccc",
@@ -1326,23 +1350,30 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 x=0.01, y=0.99,
                 xanchor="left", yanchor="top",
                 font=dict(size=12),
+                traceorder="normal",
             ),
             title={
-                'text': f"Distribusi Pohon ({len(df_plot)} pohon)",
+                'text': f"📍 Distribusi Pohon ({len(df_plot)} pohon)",
                 'x': 0.5,
                 'xanchor': 'center',
-                'font': {'size': 16, 'family': 'DM Sans'}
-            }
+                'font': {'size': 18, 'family': 'DM Sans', 'weight': 'bold'}
+            },
+            hoverlabel=dict(
+                bgcolor="white",
+                font_size=12,
+                font_family="DM Sans",
+            )
         )
     else:
+        # Konfigurasi untuk API lama (mapbox)
         fig.update_layout(
             mapbox=dict(
-                style="open-street-map",
+                style=map_style,
                 center=map_center,
                 zoom=map_zoom,
             ),
-            margin=dict(l=0, r=0, t=30, b=0),
-            height=600,
+            margin=dict(l=0, r=0, t=40, b=0),
+            height=650,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
                 bordercolor="#ccc",
@@ -1352,10 +1383,10 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 font=dict(size=12),
             ),
             title={
-                'text': f"Distribusi Pohon ({len(df_plot)} pohon)",
+                'text': f"📍 Distribusi Pohon ({len(df_plot)} pohon)",
                 'x': 0.5,
                 'xanchor': 'center',
-                'font': {'size': 16, 'family': 'DM Sans'}
+                'font': {'size': 18, 'family': 'DM Sans'}
             }
         )
     
@@ -1653,171 +1684,234 @@ def main():
             st.download_button("⬇ Download Overlay (PNG)", buf.getvalue(),
                                "mask_rcnn_overlay.png", "image/png")
 
-    # ── TAB 3: PETA DISTRIBUSI (YANG DIPERBAIKI) ───────────────────────────────
-    with tabs[3]:
-        st.markdown("## 🗺 Peta Distribusi Pohon")
+    # ── TAB 3: PETA DISTRIBUSI ───────────────────────────────
+with tabs[3]:
+    st.markdown("## 🗺 Peta Distribusi Pohon")
+    
+    # Cek apakah data tersedia
+    if "tree_df" not in st.session_state:
+        st.warning("⚠️ Belum ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu di tab **Deteksi Pohon**.")
+        st.info("💡 **Petunjuk:** Upload file GeoTIFF/JPG/PNG di sidebar kiri, lalu buka tab 'Deteksi Pohon' dan klik tombol 'Jalankan Deteksi'")
+    else:
+        df = st.session_state["tree_df"]
+        meta = st.session_state.get("meta", {})
+        gsd = st.session_state.get("gsd", params["gsd"])
         
-        # Cek apakah data tersedia
-        if "tree_df" not in st.session_state:
-            st.warning("⚠️ Belum ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu di tab **Deteksi Pohon**.")
-            st.info("💡 **Petunjuk:** Upload file GeoTIFF/JPG/PNG di sidebar kiri, lalu buka tab 'Deteksi Pohon' dan klik tombol 'Jalankan Deteksi'")
+        if df.empty:
+            st.warning("⚠️ Data pohon kosong. Silakan jalankan deteksi pohon kembali.")
         else:
-            df = st.session_state["tree_df"]
-            meta = st.session_state.get("meta", {})
-            gsd = st.session_state.get("gsd", params["gsd"])
+            # Ringkasan data
+            st.markdown("### 📊 Ringkasan Data")
+            col1, col2, col3, col4 = st.columns(4)
+            sp_counts = df["species"].value_counts()
             
-            if df.empty:
-                st.warning("⚠️ Data pohon kosong. Silakan jalankan deteksi pohon kembali.")
+            with col1:
+                st.metric("🌲 Pinus merkusii", f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
+            with col2:
+                st.metric("🌳 Swietenia mahagoni", f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
+            with col3:
+                st.metric("📍 Total Pohon", f"{len(df):,} pohon")
+            with col4:
+                st.metric("📏 GSD", f"{gsd:.3f} m/px")
+            
+            st.markdown("---")
+            
+            # Kontrol peta
+            st.markdown("### 🎮 Kontrol Peta")
+            
+            # Pilihan basemap dengan grid
+            col_ctrl1, col_ctrl2, col_ctrl3, col_ctrl4 = st.columns([2, 2, 1, 1])
+            
+            with col_ctrl1:
+                basemap = st.selectbox(
+                    "🗺 Peta Dasar:",
+                    options=list(BASEMAP_STYLES.keys()),
+                    format_func=lambda x: f"{x} - {BASEMAP_STYLES[x]['description']}",
+                    index=0,
+                    help="Pilih jenis peta dasar untuk visualisasi"
+                )
+            
+            with col_ctrl2:
+                filter_sp = st.multiselect(
+                    "🔍 Filter Spesies:",
+                    ["Pinus merkusii", "Swietenia mahagoni"],
+                    default=["Pinus merkusii", "Swietenia mahagoni"],
+                )
+            
+            with col_ctrl3:
+                show_count = st.number_input(
+                    "📌 Maks titik", 
+                    min_value=100, 
+                    max_value=5000, 
+                    value=min(2000, len(df)),
+                    step=100,
+                    help="Batasi jumlah titik untuk performa yang lebih baik"
+                )
+            
+            with col_ctrl4:
+                marker_size = st.slider(
+                    "📍 Ukuran Marker", 
+                    min_value=5, 
+                    max_value=30, 
+                    value=12,
+                    step=1,
+                    help="Perbesar/kecilkan ukuran titik pohon"
+                )
+            
+            # Filter data
+            if filter_sp:
+                df_map = df[df["species"].isin(filter_sp)].copy()
             else:
-                # Ringkasan data
-                st.markdown("### 📊 Ringkasan Data")
-                col1, col2, col3, col4 = st.columns(4)
-                sp_counts = df["species"].value_counts()
+                df_map = df.copy()
+            
+            # Batasi jumlah titik untuk performa
+            if len(df_map) > show_count:
+                df_map = df_map.sample(n=show_count, random_state=42)
+                st.info(f"📊 Menampilkan {show_count:,} dari {len(df):,} total pohon untuk performa optimal")
+            
+            if df_map.empty:
+                st.warning("⚠️ Tidak ada pohon untuk ditampilkan dengan filter yang dipilih.")
+            else:
+                # Tentukan koordinat pusat
+                center_lat = params["map_lat"]
+                center_lon = params["map_lon"]
                 
-                with col1:
-                    st.metric("🌲 Pinus merkusii", f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
-                with col2:
-                    st.metric("🌳 Swietenia mahagoni", f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
-                with col3:
-                    st.metric("📍 Total Pohon", f"{len(df):,} pohon")
-                with col4:
-                    st.metric("📏 GSD", f"{gsd:.3f} m/px")
+                # Cek apakah ada koordinat dari GeoTIFF
+                if meta.get("bounds"):
+                    try:
+                        bounds = meta["bounds"]
+                        if hasattr(bounds, '__len__') and len(bounds) >= 4:
+                            left, bottom, right, top = bounds[0], bounds[1], bounds[2], bounds[3]
+                            center_lat = (bottom + top) / 2
+                            center_lon = (left + right) / 2
+                            st.success(f"📍 Menggunakan koordinat dari GeoTIFF: {center_lat:.5f}, {center_lon:.5f}")
+                    except Exception as e:
+                        st.warning(f"Gagal membaca koordinat GeoTIFF: {str(e)[:100]}")
                 
-                st.markdown("---")
-                
-                # Kontrol peta
-                st.markdown("### 🎮 Kontrol Peta")
-                col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 1])
-                
-                with col_ctrl1:
-                    basemap = st.selectbox(
-                        "🗺 Peta Dasar:",
-                        list(BASEMAP_OPTIONS.keys()),
-                        index=0,
-                    )
-                
-                with col_ctrl2:
-                    filter_sp = st.multiselect(
-                        "🔍 Filter Spesies:",
-                        ["Pinus merkusii", "Swietenia mahagoni"],
-                        default=["Pinus merkusii", "Swietenia mahagoni"],
-                    )
-                
-                with col_ctrl3:
-                    show_count = st.number_input(
-                        "📌 Maks titik", 
-                        min_value=100, 
-                        max_value=5000, 
-                        value=min(2000, len(df)),
-                        step=100
-                    )
-                
-                # Filter data
-                if filter_sp:
-                    df_map = df[df["species"].isin(filter_sp)].copy()
-                else:
-                    df_map = df.copy()
-                
-                # Batasi jumlah titik untuk performa
-                if len(df_map) > show_count:
-                    df_map = df_map.sample(n=show_count, random_state=42)
-                    st.info(f"📊 Menampilkan {show_count:,} dari {len(df):,} total pohon untuk performa optimal")
-                
-                if df_map.empty:
-                    st.warning("⚠️ Tidak ada pohon untuk ditampilkan dengan filter yang dipilih.")
-                else:
-                    # Tentukan koordinat pusat
-                    center_lat = params["map_lat"]
-                    center_lon = params["map_lon"]
-                    
-                    # Cek apakah ada koordinat dari GeoTIFF
-                    if meta.get("bounds"):
-                        try:
-                            bounds = meta["bounds"]
-                            if len(bounds) >= 4:
-                                left, bottom, right, top = bounds[0], bounds[1], bounds[2], bounds[3]
-                                center_lat = (bottom + top) / 2
-                                center_lon = (left + right) / 2
-                                st.info(f"📍 Menggunakan koordinat dari GeoTIFF: {center_lat:.5f}, {center_lon:.5f}")
-                        except Exception as e:
-                            st.warning(f"Gagal membaca koordinat GeoTIFF: {str(e)[:100]}")
-                    
-                    # Buat peta
-                    with st.spinner("🔄 Membangun peta distribusi..."):
-                        try:
-                            fig_map = build_plotly_map(
-                                df_map, 
-                                basemap,
-                                center_lat, 
-                                center_lon,
-                                params["map_zoom"], 
-                                gsd,
-                                None,  # img_origin_lat
-                                None,  # img_origin_lon
-                                meta
-                            )
+                # Buat peta
+                with st.spinner(f"🔄 Membangun peta dengan basemap '{basemap}'..."):
+                    try:
+                        fig_map = build_plotly_map(
+                            df_map, 
+                            basemap,
+                            center_lat, 
+                            center_lon,
+                            params["map_zoom"], 
+                            gsd,
+                            None,  # img_origin_lat
+                            None,  # img_origin_lon
+                            meta
+                        )
+                        
+                        # Update ukuran marker jika diperlukan
+                        if marker_size != 12:
+                            for trace in fig_map.data:
+                                if hasattr(trace, 'marker') and trace.marker:
+                                    if hasattr(trace.marker, 'size'):
+                                        # Adjust marker sizes
+                                        current_sizes = trace.marker.size
+                                        if isinstance(current_sizes, list):
+                                            # Scale the sizes
+                                            scale = marker_size / 12
+                                            trace.marker.size = [s * scale for s in current_sizes]
+                                        elif isinstance(current_sizes, (int, float)):
+                                            trace.marker.size = marker_size
+                        
+                        # Tampilkan peta
+                        if fig_map and len(fig_map.data) > 0:
+                            st.plotly_chart(fig_map, use_container_width=True, config={
+                                'displayModeBar': True,
+                                'displaylogo': False,
+                                'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                                'scrollZoom': True,
+                                'doubleClick': 'reset'
+                            })
                             
-                            # Tampilkan peta
-                            if fig_map and len(fig_map.data) > 0:
-                                st.plotly_chart(fig_map, use_container_width=True, config={'displayModeBar': True})
+                            # Informasi basemap
+                            st.info(f"🗺️ Menggunakan peta dasar: **{basemap}** - {BASEMAP_STYLES[basemap]['description']}")
+                            
+                            # Informasi tambahan
+                            st.markdown("---")
+                            st.markdown("### ℹ️ Informasi Peta")
+                            info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+                            with info_col1:
+                                st.markdown(f"**✅ Titik ditampilkan:** {len(df_map):,} pohon")
+                            with info_col2:
+                                st.markdown(f"**📏 Jarak min antar pohon:** {params['min_dist']:.1f} m")
+                            with info_col3:
+                                st.markdown(f"**🔍 Zoom level:** {params['map_zoom']}")
+                            with info_col4:
+                                if meta.get("crs"):
+                                    crs_str = str(meta["crs"])[:40]
+                                    st.markdown(f"**🗺️ CRS:** {crs_str}...")
+                            
+                            # Legenda interaktif
+                            with st.expander("🎨 Legenda & Petunjuk Penggunaan Peta", expanded=False):
+                                st.markdown("""
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 8px;">
+                                <b>🎨 Warna Marker:</b><br>
+                                🔵 <b>Biru</b> = <i>Pinus merkusii</i> (Tusam)<br>
+                                🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
                                 
-                                # Informasi tambahan
-                                st.markdown("---")
-                                st.markdown("### ℹ️ Informasi Peta")
-                                info_col1, info_col2, info_col3 = st.columns(3)
-                                with info_col1:
-                                    st.markdown(f"**✅ Titik ditampilkan:** {len(df_map):,} pohon")
-                                with info_col2:
-                                    st.markdown(f"**📏 Jarak min antar pohon:** {params['min_dist']:.1f} m")
-                                with info_col3:
-                                    if meta.get("crs"):
-                                        crs_str = str(meta["crs"])[:50]
-                                        st.markdown(f"**🗺️ Sistem koordinat:** {crs_str}...")
+                                <b>📏 Ukuran Marker:</b><br>
+                                • Proporsional dengan diameter tajuk (ECD)<br>
+                                • Pohon besar = marker lebih besar<br>
                                 
-                                # Legenda
-                                st.markdown(
-                                    """
-                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #4CAF50;">
-                                    <small>
-                                    🎨 <b>Legenda:</b><br>
-                                    🔵 <b>Biru</b> = <i>Pinus merkusii</i> (Tusam)<br>
-                                    🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
-                                    📏 <b>Ukuran marker</b> = proporsional dengan diameter tajuk (ECD)<br>
-                                    🖱️ <b>Hover / Klik</b> pada titik untuk melihat detail pohon<br>
-                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta
-                                    </small>
-                                    </div>
-                                    """,
-                                    unsafe_allow_html=True,
-                                )
-                            else:
-                                st.error("❌ Gagal membuat peta: tidak ada data yang dapat ditampilkan")
-                                st.info("💡 Tips: Coba kurangi filter atau refresh halaman")
+                                <b>🖱️ Interaksi Peta:</b><br>
+                                • <b>Hover</b> - Lihat detail pohon (tinggi, karbon, dll)<br>
+                                • <b>Klik</b> - Pilih pohon tertentu<br>
+                                • <b>Scroll</b> - Zoom in/out<br>
+                                • <b>Drag</b> - Geser peta<br>
+                                • <b>Double click</b> - Reset tampilan<br>
                                 
-                        except Exception as e:
-                            st.error(f"❌ Error saat membuat peta: {str(e)}")
-                            st.exception(e)
+                                <b>🗺️ Jenis Peta Dasar:</b><br>
+                                • <b>OpenStreetMap</b> - Peta jalan standar<br>
+                                • <b>Satellite Imagery</b> - Citra satelit real<br>
+                                • <b>Satellite Streets</b> - Citra satelit + overlay jalan<br>
+                                • <b>Terrain</b> - Peta kontur dan elevasi<br>
+                                • <b>Light/Dark</b> - Tema minimalis<br>
+                                • <b>Outdoors</b> - Detail alam untuk outdoor<br>
+                                </div>
+                                """, unsafe_allow_html=True)
+                        else:
+                            st.error("❌ Gagal membuat peta: tidak ada data yang dapat ditampilkan")
+                            st.info("💡 Tips: Coba kurangi filter atau refresh halaman")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error saat membuat peta: {str(e)}")
+                        st.exception(e)
+                        st.info("💡 Saran: Coba pilih basemap 'OpenStreetMap' atau refresh halaman")
+            
+            # Statistik per spesies
+            if not df.empty:
+                st.markdown("---")
+                st.markdown("### 📈 Statistik per Spesies")
                 
-                # Statistik per spesies
-                if not df.empty:
-                    st.markdown("---")
-                    st.markdown("### 📈 Statistik per Spesies")
-                    
-                    stats_df = df.groupby("species").agg({
-                        "id": "count",
-                        "height_m": ["mean", "std"],
-                        "ecd_m": ["mean", "std"],
-                        "crown_area_m2": "mean",
-                        "carbon_kg": "sum",
-                        "co2e_kg": "sum"
-                    }).round(2)
-                    
-                    # Rename columns
-                    stats_df.columns = ["Jumlah", "Tinggi (m)", "Std Tinggi", 
-                                        "ECD (m)", "Std ECD", 
-                                        "Luas Tajuk (m²)", "Total Karbon (kg)", "Total CO₂e (kg)"]
-                    
-                    st.dataframe(stats_df, use_container_width=True)
+                stats_df = df.groupby("species").agg({
+                    "id": "count",
+                    "height_m": ["mean", "std"],
+                    "ecd_m": ["mean", "std"],
+                    "crown_area_m2": "mean",
+                    "carbon_kg": "sum",
+                    "co2e_kg": "sum"
+                }).round(2)
+                
+                # Rename columns
+                stats_df.columns = ["Jumlah", "Tinggi (m)", "Std Tinggi", 
+                                    "ECD (m)", "Std ECD", 
+                                    "Luas Tajuk (m²)", "Total Karbon (kg)", "Total CO₂e (kg)"]
+                
+                st.dataframe(stats_df, use_container_width=True)
+                
+                # Download statistik
+                csv_stats = stats_df.reset_index().to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    "📥 Download Statistik (CSV)",
+                    csv_stats,
+                    "statistik_pohon.csv",
+                    "text/csv",
+                    key="download_stats"
+                )
 
     # ── TAB 4: ANALISIS KARBON ───────────────────────────────
     with tabs[4]:
