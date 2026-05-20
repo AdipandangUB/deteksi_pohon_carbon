@@ -63,9 +63,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Batas upload (Streamlit Cloud biasanya 200MB default)
-MAX_UPLOAD_SIZE_MB = 200
+# === PERUBAHAN: Batas upload menjadi 300MB ===
+MAX_UPLOAD_SIZE_MB = 300
 MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# Konfigurasi server untuk upload besar
+try:
+    # Mencoba mengatur konfigurasi server untuk mendukung upload besar
+    st._config.set_option('server.maxUploadSize', MAX_UPLOAD_SIZE_MB)
+except:
+    pass
 
 # ──────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -114,9 +121,6 @@ UB_FOREST_ZOOM = 15
 # ──────────────────────────────────────────────────────────────
 # IMPORT OPTIONAL LIBRARIES with Fallback
 # ──────────────────────────────────────────────────────────────
-# Untuk Streamlit Cloud, kita akan menggunakan implementasi sederhana
-# jika library berat tidak tersedia
-
 HAS_RASTERIO = False
 HAS_GDAL = False
 HAS_SCIPY = False
@@ -148,17 +152,13 @@ try:
 except ImportError:
     pass
 
-# Untuk deployment, kita sediakan fallback functions
-
 def gaussian_filter_fallback(image, sigma=1):
     """Fallback Gaussian blur sederhana"""
     if sigma == 0:
         return image
     from PIL import ImageFilter
     img_pil = Image.fromarray(image.astype(np.float32))
-    # Konversi ke mode 'F' untuk floating point
     img_pil = img_pil.convert('F')
-    # Apply blur
     radius = int(sigma * 2)
     if radius > 0:
         img_blur = img_pil.filter(ImageFilter.GaussianBlur(radius=radius))
@@ -170,24 +170,18 @@ def peak_local_max_fallback(image, min_distance=10, threshold_abs=0, exclude_bor
     from scipy import ndimage
     from scipy.ndimage import maximum_filter
     
-    # Apply maximum filter
     size = 2 * min_distance + 1
     max_filtered = maximum_filter(image, size=size)
     
-    # Find peaks
     peaks = (image == max_filtered) & (image >= threshold_abs)
     
-    # Get coordinates
     coords = np.argwhere(peaks)
     
-    # Filter border if needed
     if exclude_border:
         coords = coords[(coords[:, 0] >= min_distance) & (coords[:, 0] < image.shape[0] - min_distance) &
                         (coords[:, 1] >= min_distance) & (coords[:, 1] < image.shape[1] - min_distance)]
     
-    # Limit number of peaks
     if len(coords) > num_peaks:
-        # Sort by intensity and take top peaks
         intensities = image[coords[:, 0], coords[:, 1]]
         idx = np.argsort(intensities)[-num_peaks:]
         coords = coords[idx]
@@ -197,17 +191,15 @@ def peak_local_max_fallback(image, min_distance=10, threshold_abs=0, exclude_bor
 def watershed_fallback(image, markers, mask=None, compactness=0):
     """Fallback watershed sederhana"""
     from scipy import ndimage
-    from scipy.ndimage import label as ndi_label
+    from scipy.ndimage import binary_dilation
     
-    # Simple segmentation based on markers
     labels = np.zeros_like(image, dtype=int)
     for i, (r, c) in enumerate(markers, start=1):
-        labels[r, c] = i
+        if 0 <= r < image.shape[0] and 0 <= c < image.shape[1]:
+            labels[r, c] = i
     
-    # Dilate markers
-    from scipy.ndimage import binary_dilation
     kernel = np.ones((3, 3))
-    for i in range(1, 11):
+    for _ in range(1, 11):
         for label_id in range(1, len(markers) + 1):
             mask_label = (labels == label_id)
             if mask_label.any():
@@ -237,7 +229,6 @@ def regionprops_fallback(labels, intensity_image=None):
         
         area = mask.sum()
         
-        # Properties
         class Prop:
             def __init__(self, area_val, label_val, bbox_val):
                 self.area = area_val
@@ -279,13 +270,22 @@ def validate_file_size(uploaded_file, file_type: str = "file") -> Tuple[bool, fl
     file_size = uploaded_file.tell()
     uploaded_file.seek(0)
     size_mb = file_size / (1024 * 1024)
+    size_gb = size_mb / 1024
+    
     if file_size > MAX_UPLOAD_BYTES:
-        st.error(f"❌ **{file_type} terlalu besar!** Maksimum: {MAX_UPLOAD_SIZE_MB} MB")
+        if size_gb >= 1:
+            ukuran_display = f"{size_gb:.2f} GB"
+        else:
+            ukuran_display = f"{size_mb:.2f} MB"
+        st.error(f"❌ **{file_type} terlalu besar!**\nUkuran: **{ukuran_display}**\nMaksimum: **{MAX_UPLOAD_SIZE_MB} MB**")
         return False, size_mb
     return True, size_mb
 
 def format_file_size(size_mb: float) -> str:
-    return f"{size_mb/1024:.2f} GB" if size_mb >= 1024 else f"{size_mb:.2f} MB"
+    if size_mb >= 1024:
+        return f"{size_mb/1024:.2f} GB"
+    else:
+        return f"{size_mb:.2f} MB"
 
 def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
     meta = {"width": 0, "height": 0, "bands": 0, "crs": None,
@@ -369,7 +369,6 @@ def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
     if HAS_SCIPY:
         chm = gaussian_filter(chm_raw.astype(float), sigma=sigma)
     else:
-        # Fallback blur
         from PIL import ImageFilter
         chm_img = Image.fromarray(chm_raw.astype(np.float32))
         chm_img = chm_img.convert('F')
@@ -400,7 +399,8 @@ def detect_trees(chm: np.ndarray, min_height: float = 3.0,
     )
     markers = np.zeros(chm.shape, dtype=int)
     for i, (r, c) in enumerate(coords, start=1):
-        markers[r, c] = i
+        if 0 <= r < chm.shape[0] and 0 <= c < chm.shape[1]:
+            markers[r, c] = i
     labels = watershed(-chm_masked, markers, mask=chm_masked > 0, compactness=0.01)
     peaks = coords
 
@@ -734,7 +734,7 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
     return np.array(result)
 
 # ──────────────────────────────────────────────────────────────
-# MAP RENDERING (Plotly only, tanpa folium untuk kompatibilitas)
+# MAP RENDERING (Plotly only)
 # ──────────────────────────────────────────────────────────────
 BASEMAP_OPTIONS = {
     "OpenStreetMap": {
@@ -850,7 +850,10 @@ def render_sidebar():
     st.sidebar.markdown("## Parameter Analisis")
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
-    <div class="upload-warning">Batas Upload: {MAX_UPLOAD_SIZE_MB} MB per file</div>
+    <div class="upload-warning">
+    ⚠️ Batas Upload: <b>{MAX_UPLOAD_SIZE_MB} MB</b> per file<br>
+    <small>Untuk file > 200MB, proses mungkin memerlukan waktu lebih lama</small>
+    </div>
     """, unsafe_allow_html=True)
     st.sidebar.markdown("### Data Input")
     uploaded_main = st.sidebar.file_uploader(
@@ -947,6 +950,11 @@ def main():
 **Catatan Klasifikasi Spesies:**
 - **Pinus merkusii** 🌲: tajuk **gelap, biru-ungu** (G–B rendah / negatif, brightness < 110)
 - **Swietenia mahagoni** 🌳: tajuk **terang, kuning-hijau** (G–B tinggi > 40, brightness > 120)
+
+**⚠️ Catatan untuk File Besar:**
+- File > 200MB mungkin memerlukan waktu upload dan proses yang lebih lama
+- Pastikan koneksi internet stabil saat upload
+- Sistem akan secara otomatis meresize gambar untuk optimasi memory
         """)
 
     # TAB 1: DETEKSI POHON
@@ -1146,7 +1154,6 @@ def main():
             df   = st.session_state["tree_df"]
             meta = st.session_state.get("meta", {})
             gsd  = st.session_state.get("gsd", params["gsd"])
-            rgb  = st.session_state["rgb"]
 
             bc1, bc2 = st.columns([2, 1])
             with bc1:
@@ -1262,6 +1269,10 @@ def main():
             st.download_button("⬇ Download CSV (Data Lengkap)", csv,
                                "ub_forest_hasil_deteksi.csv", "text/csv",
                                use_container_width=True)
+            
+            # Tambahkan info ukuran file yang diupload
+            if "meta" in st.session_state and st.session_state["meta"].get("file_size_display"):
+                st.info(f"📊 File yang diproses: {st.session_state['meta']['file_size_display']}")
         else:
             st.info("Jalankan deteksi pohon terlebih dahulu untuk mengekspor data.")
 
