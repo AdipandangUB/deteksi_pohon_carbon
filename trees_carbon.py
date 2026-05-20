@@ -1324,7 +1324,7 @@ def render_sidebar() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
-# MAIN
+# MAIN FUNCTION - LENGKAP DAN DIPERBAIKI
 # ══════════════════════════════════════════════════════════════
 
 def main():
@@ -1342,6 +1342,7 @@ def main():
 
     params = render_sidebar()
 
+    # Buat tabs dengan benar
     tabs = st.tabs([
         "📖 Panduan",
         "🔍 Deteksi Pohon",
@@ -1377,121 +1378,120 @@ def main():
         st.markdown("## Deteksi Pohon")
         if params["uploaded_main"] is None:
             st.info("📁 Upload foto udara di sidebar kiri untuk memulai.")
-            return
-
-        with st.spinner("📂 Memuat gambar…"):
-            rgb, meta = load_image_array(params["uploaded_main"])
-
-        if rgb is None:
-            st.error("❌ Gambar tidak dapat dimuat. Cek format dan ukuran file.")
-            return
-
-        # Metadata ringkas
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Ukuran Gambar",    f"{rgb.shape[1]:,} × {rgb.shape[0]:,} px")
-        c2.metric("Ukuran File",       meta.get("file_size_display", "—"))
-        c3.metric("Format",            meta.get("driver", "—"))
-        if meta.get("gsd_m"):
-            c4.metric("GSD (dari file)", f"{meta['gsd_m']:.4f} m/px")
+            # Jangan return, biarkan tabs lainnya tetap bisa diakses
         else:
-            c4.metric("GSD (setting)",   f"{params['gsd']} m/px")
+            with st.spinner("📂 Memuat gambar…"):
+                rgb, meta = load_image_array(params["uploaded_main"])
 
-        if meta.get("original_size"):
-            st.info(
-                f"📏 Original: {meta['original_size'][0]}×{meta['original_size'][1]} px"
-                f" → Resized: {meta['resized_to'][0]}×{meta['resized_to'][1]} px"
-            )
+            if rgb is None:
+                st.error("❌ Gambar tidak dapat dimuat. Cek format dan ukuran file.")
+            else:
+                # Metadata ringkas
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Ukuran Gambar",    f"{rgb.shape[1]:,} × {rgb.shape[0]:,} px")
+                c2.metric("Ukuran File",       meta.get("file_size_display", "—"))
+                c3.metric("Format",            meta.get("driver", "—"))
+                if meta.get("gsd_m"):
+                    c4.metric("GSD (dari file)", f"{meta['gsd_m']:.4f} m/px")
+                else:
+                    c4.metric("GSD (setting)",   f"{params['gsd']} m/px")
 
-        # Preview
-        st.markdown("### Preview Foto Udara")
-        prev = Image.fromarray(rgb)
-        w, h = prev.size
-        if w > 800:
-            prev = prev.resize((800, int(h * 800 / w)))
-        st.image(prev, caption=f"Citra UAV — {meta.get('driver','')}", use_container_width=True)
+                if meta.get("original_size"):
+                    st.info(
+                        f"📏 Original: {meta['original_size'][0]}×{meta['original_size'][1]} px"
+                        f" → Resized: {meta['resized_to'][0]}×{meta['resized_to'][1]} px"
+                    )
 
-        # Tombol deteksi
-        if st.button("🚀 Jalankan Deteksi", type="primary", use_container_width=True):
-            t0  = time.time()
-            gsd = meta.get("gsd_m") or params["gsd"]
-            if meta.get("gsd_m"):
-                st.info(f"📏 GSD dari file: {gsd:.4f} m/pixel")
+                # Preview
+                st.markdown("### Preview Foto Udara")
+                prev = Image.fromarray(rgb)
+                w, h = prev.size
+                if w > 800:
+                    prev = prev.resize((800, int(h * 800 / w)))
+                st.image(prev, caption=f"Citra UAV — {meta.get('driver','')}", use_container_width=True)
 
-            min_dist_px = max(int(params["min_dist"] / gsd), 10)
-            prog        = st.progress(0, "Memulai analisis…")
+                # Tombol deteksi
+                if st.button("🚀 Jalankan Deteksi", type="primary", use_container_width=True):
+                    t0  = time.time()
+                    gsd = meta.get("gsd_m") or params["gsd"]
+                    if meta.get("gsd_m"):
+                        st.info(f"📏 GSD dari file: {gsd:.4f} m/pixel")
 
-            with st.spinner("🔄 Membangun CHM…"):
-                chm = rgb_to_simulated_chm(rgb, sigma=params["sigma"], gsd_m=gsd)
-            prog.progress(20, "CHM selesai…")
+                    min_dist_px = max(int(params["min_dist"] / gsd), 10)
+                    prog        = st.progress(0, "Memulai analisis…")
 
-            with st.spinner("🔍 Mendeteksi puncak pohon…"):
-                labels, peaks = detect_trees(chm, params["min_h"], min_dist_px, gsd)
-            prog.progress(45, f"{len(peaks)} kandidat ditemukan…")
+                    with st.spinner("🔄 Membangun CHM…"):
+                        chm = rgb_to_simulated_chm(rgb, sigma=params["sigma"], gsd_m=gsd)
+                    prog.progress(20, "CHM selesai…")
 
-            with st.spinner("📊 Mengekstraksi metrik…"):
-                df_trees = extract_tree_metrics(labels, peaks, chm, rgb, gsd)
-            prog.progress(65, f"{len(df_trees)} pohon tervalidasi…")
+                    with st.spinner("🔍 Mendeteksi puncak pohon…"):
+                        labels, peaks = detect_trees(chm, params["min_h"], min_dist_px, gsd)
+                    prog.progress(45, f"{len(peaks)} kandidat ditemukan…")
 
-            # Referensi spektral opsional
-            pinus_ref = mahoni_ref = None
-            if params["uploaded_pinus"]:
-                arr = load_sample_image(params["uploaded_pinus"], "Sampel Pinus")
-                if arr is not None:
-                    pinus_ref = _extract_spectral_ref(arr)
-                    st.success(f"✅ Pinus ref  G−B = {pinus_ref['gb_diff']:.1f}")
-            if params["uploaded_mahoni"]:
-                arr = load_sample_image(params["uploaded_mahoni"], "Sampel Mahoni")
-                if arr is not None:
-                    mahoni_ref = _extract_spectral_ref(arr)
-                    st.success(f"✅ Mahoni ref G−B = {mahoni_ref['gb_diff']:.1f}")
+                    with st.spinner("📊 Mengekstraksi metrik…"):
+                        df_trees = extract_tree_metrics(labels, peaks, chm, rgb, gsd)
+                    prog.progress(65, f"{len(df_trees)} pohon tervalidasi…")
 
-            with st.spinner("🏷 Mengklasifikasi spesies…"):
-                df_trees = classify_species(df_trees, pinus_ref, mahoni_ref)
-            with st.spinner("💰 Menghitung karbon…"):
-                df_trees = compute_carbon(df_trees)
-            prog.progress(95, "Hampir selesai…")
+                    # Referensi spektral opsional
+                    pinus_ref = mahoni_ref = None
+                    if params["uploaded_pinus"]:
+                        arr = load_sample_image(params["uploaded_pinus"], "Sampel Pinus")
+                        if arr is not None:
+                            pinus_ref = _extract_spectral_ref(arr)
+                            st.success(f"✅ Pinus ref  G−B = {pinus_ref['gb_diff']:.1f}")
+                    if params["uploaded_mahoni"]:
+                        arr = load_sample_image(params["uploaded_mahoni"], "Sampel Mahoni")
+                        if arr is not None:
+                            mahoni_ref = _extract_spectral_ref(arr)
+                            st.success(f"✅ Mahoni ref G−B = {mahoni_ref['gb_diff']:.1f}")
 
-            # Simpan ke session state
-            st.session_state["tree_df"] = df_trees
-            st.session_state["rgb"]     = rgb
-            st.session_state["chm"]     = chm
-            st.session_state["meta"]    = meta
-            st.session_state["gsd"]     = gsd
+                    with st.spinner("🏷 Mengklasifikasi spesies…"):
+                        df_trees = classify_species(df_trees, pinus_ref, mahoni_ref)
+                    with st.spinner("💰 Menghitung karbon…"):
+                        df_trees = compute_carbon(df_trees)
+                    prog.progress(95, "Hampir selesai…")
 
-            prog.progress(100, "Selesai!")
-            del chm, labels, peaks
-            gc.collect()
+                    # Simpan ke session state
+                    st.session_state["tree_df"] = df_trees
+                    st.session_state["rgb"]     = rgb
+                    st.session_state["chm"]     = chm
+                    st.session_state["meta"]    = meta
+                    st.session_state["gsd"]     = gsd
 
-            elapsed = time.time() - t0
-            st.success(f"✅ {len(df_trees):,} pohon terdeteksi dalam {elapsed:.1f} detik.")
+                    prog.progress(100, "Selesai!")
+                    del chm, labels, peaks
+                    gc.collect()
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Total Pohon",      f"{len(df_trees):,}")
-            c2.metric("Rata-rata Tinggi", f"{df_trees['height_m'].mean():.1f} m")
-            c3.metric("Rata-rata ECD",    f"{df_trees['ecd_m'].mean():.1f} m")
-            sp_counts = df_trees["species"].value_counts()
-            c4.metric("Pinus / Mahoni",
-                      f"{sp_counts.get('Pinus merkusii', 0)} / "
-                      f"{sp_counts.get('Swietenia mahagoni', 0)}")
+                    elapsed = time.time() - t0
+                    st.success(f"✅ {len(df_trees):,} pohon terdeteksi dalam {elapsed:.1f} detik.")
 
-            fig_gb = px.histogram(
-                df_trees, x="gb_diff", color="species", nbins=40,
-                title="Distribusi G−B (fitur utama klasifikasi spesies)",
-                labels={"gb_diff": "G − B", "count": "Jumlah Pohon"},
-                color_discrete_map={"Pinus merkusii": "#2196F3",
-                                    "Swietenia mahagoni": "#FF9800"},
-            )
-            fig_gb.add_vline(x=0, line_dash="dash", line_color="gray",
-                             annotation_text="Pinus ← | → Mahoni")
-            fig_gb.update_layout(height=300)
-            st.plotly_chart(fig_gb, use_container_width=True)
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Total Pohon",      f"{len(df_trees):,}")
+                    c2.metric("Rata-rata Tinggi", f"{df_trees['height_m'].mean():.1f} m")
+                    c3.metric("Rata-rata ECD",    f"{df_trees['ecd_m'].mean():.1f} m")
+                    sp_counts = df_trees["species"].value_counts()
+                    c4.metric("Pinus / Mahoni",
+                              f"{sp_counts.get('Pinus merkusii', 0)} / "
+                              f"{sp_counts.get('Swietenia mahagoni', 0)}")
 
-            st.dataframe(
-                df_trees[["id", "species", "confidence", "height_m", "ecd_m",
-                           "gb_diff", "brightness_px", "crown_area_m2",
-                           "dbh_cm", "carbon_kg"]].head(20),
-                use_container_width=True,
-            )
+                    fig_gb = px.histogram(
+                        df_trees, x="gb_diff", color="species", nbins=40,
+                        title="Distribusi G−B (fitur utama klasifikasi spesies)",
+                        labels={"gb_diff": "G − B", "count": "Jumlah Pohon"},
+                        color_discrete_map={"Pinus merkusii": "#2196F3",
+                                            "Swietenia mahagoni": "#FF9800"},
+                    )
+                    fig_gb.add_vline(x=0, line_dash="dash", line_color="gray",
+                                     annotation_text="Pinus ← | → Mahoni")
+                    fig_gb.update_layout(height=300)
+                    st.plotly_chart(fig_gb, use_container_width=True)
+
+                    st.dataframe(
+                        df_trees[["id", "species", "confidence", "height_m", "ecd_m",
+                                   "gb_diff", "brightness_px", "crown_area_m2",
+                                   "dbh_cm", "carbon_kg"]].head(20),
+                        use_container_width=True,
+                    )
 
     # ── TAB 2: MASK R-CNN ─────────────────────────────────────
     with tabs[2]:
@@ -1540,141 +1540,171 @@ def main():
             st.download_button("⬇ Download Overlay (PNG)", buf.getvalue(),
                                "mask_rcnn_overlay.png", "image/png")
 
-    # ── TAB 3: PETA DISTRIBUSI ───────────────────────────────
-with tabs[3]:
-    st.markdown("## 🗺 Peta Distribusi Pohon")
-    if "tree_df" not in st.session_state:
-        st.info("Jalankan deteksi pohon terlebih dahulu di tab **Deteksi Pohon**.")
-    else:
-        df = st.session_state["tree_df"]
-        meta = st.session_state.get("meta", {})
-        gsd = st.session_state.get("gsd", params["gsd"])
+    # ── TAB 3: PETA DISTRIBUSI (YANG DIPERBAIKI) ───────────────────────────────
+    with tabs[3]:
+        st.markdown("## 🗺 Peta Distribusi Pohon")
         
-        if df.empty:
-            st.warning("Tidak ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu.")
+        # Cek apakah data tersedia
+        if "tree_df" not in st.session_state:
+            st.warning("⚠️ Belum ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu di tab **Deteksi Pohon**.")
+            st.info("💡 **Petunjuk:** Upload file GeoTIFF/JPG/PNG di sidebar kiri, lalu buka tab 'Deteksi Pohon' dan klik tombol 'Jalankan Deteksi'")
         else:
-            # Ringkasan cepat
-            sp_counts = df["species"].value_counts()
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("🌲 Pinus merkusii", f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
-            with col2:
-                st.metric("🌳 Swietenia mahagoni", f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
-            with col3:
-                st.metric("📍 Total Pohon", f"{len(df):,} pohon")
-            with col4:
-                st.metric("📏 GSD", f"{gsd:.3f} m/px")
+            df = st.session_state["tree_df"]
+            meta = st.session_state.get("meta", {})
+            gsd = st.session_state.get("gsd", params["gsd"])
             
-            st.markdown("---")
-            
-            # Kontrol peta
-            col_ctrl1, col_ctrl2 = st.columns([2, 3])
-            with col_ctrl1:
-                basemap = st.radio(
-                    "🗺 Peta Dasar:",
-                    list(BASEMAP_OPTIONS.keys()),
-                    horizontal=True,
-                )
-            with col_ctrl2:
-                filter_sp = st.multiselect(
-                    "🔍 Filter Spesies:",
-                    ["Pinus merkusii", "Swietenia mahagoni"],
-                    default=["Pinus merkusii", "Swietenia mahagoni"],
-                )
-            
-            # Filter data
-            if filter_sp:
-                df_map = df[df["species"].isin(filter_sp)].copy()
+            if df.empty:
+                st.warning("⚠️ Data pohon kosong. Silakan jalankan deteksi pohon kembali.")
             else:
-                df_map = df.copy()
-            
-            if df_map.empty:
-                st.warning("Tidak ada pohon untuk ditampilkan dengan filter yang dipilih.")
-            else:
-                # Dapatkan koordinat pusat
-                center_lat = params["map_lat"]
-                center_lon = params["map_lon"]
-                orig_lat = None
-                orig_lon = None
+                # Ringkasan data
+                st.markdown("### 📊 Ringkasan Data")
+                col1, col2, col3, col4 = st.columns(4)
+                sp_counts = df["species"].value_counts()
                 
-                # Cek apakah ada bounds dari GeoTIFF
-                if meta.get("bounds"):
-                    try:
-                        b = meta["bounds"]
-                        if len(b) >= 4:
-                            left, bottom, right, top = float(b[0]), float(b[1]), float(b[2]), float(b[3])
-                            center_lat = (bottom + top) / 2
-                            center_lon = (left + right) / 2
-                            orig_lat = top
-                            orig_lon = left
-                            st.info(f"📍 Menggunakan koordinat dari GeoTIFF: {center_lat:.5f}, {center_lon:.5f}")
-                    except Exception as e:
-                        st.warning(f"Gagal membaca bounds: {str(e)[:100]}")
+                with col1:
+                    st.metric("🌲 Pinus merkusii", f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
+                with col2:
+                    st.metric("🌳 Swietenia mahagoni", f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
+                with col3:
+                    st.metric("📍 Total Pohon", f"{len(df):,} pohon")
+                with col4:
+                    st.metric("📏 GSD", f"{gsd:.3f} m/px")
                 
-                # Tampilkan progress
-                with st.spinner("🔄 Membangun peta distribusi..."):
-                    try:
-                        fig_map = build_plotly_map(
-                            df_map, basemap,
-                            center_lat, center_lon,
-                            params["map_zoom"], gsd,
-                            orig_lat, orig_lon,
-                            meta=meta
-                        )
-                        
-                        # Cek apakah figure memiliki data
-                        if fig_map and len(fig_map.data) > 0:
-                            st.plotly_chart(fig_map, use_container_width=True)
-                            
-                            # Informasi tambahan
-                            st.markdown("---")
-                            st.markdown("### 📊 Informasi Peta")
-                            col_info1, col_info2, col_info3 = st.columns(3)
-                            with col_info1:
-                                st.markdown(f"**Total titik ditampilkan:** {len(df_map):,} pohon")
-                            with col_info2:
-                                st.markdown(f"**Jarak minimum antar pohon:** {params['min_dist']:.1f} m")
-                            with col_info3:
-                                if meta.get("crs"):
-                                    st.markdown(f"**Sistem koordinat:** {meta['crs'][:50]}...")
-                            
-                            # Legenda
-                            st.markdown(
-                                """
-                                <div style="background: #f5f5f5; padding: 10px; border-radius: 8px; margin-top: 10px;">
-                                <small>
-                                🎨 <b>Legenda:</b><br>
-                                🔵 <b>Biru</b> = <i>Pinus merkusii</i> (Tusam)<br>
-                                🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
-                                📏 <b>Ukuran marker</b> ∝ diameter tajuk (ECD)<br>
-                                🖱️ <b>Hover</b> untuk melihat detail pohon
-                                </small>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
+                st.markdown("---")
+                
+                # Kontrol peta
+                st.markdown("### 🎮 Kontrol Peta")
+                col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 1])
+                
+                with col_ctrl1:
+                    basemap = st.selectbox(
+                        "🗺 Peta Dasar:",
+                        list(BASEMAP_OPTIONS.keys()),
+                        index=0,
+                    )
+                
+                with col_ctrl2:
+                    filter_sp = st.multiselect(
+                        "🔍 Filter Spesies:",
+                        ["Pinus merkusii", "Swietenia mahagoni"],
+                        default=["Pinus merkusii", "Swietenia mahagoni"],
+                    )
+                
+                with col_ctrl3:
+                    show_count = st.number_input(
+                        "📌 Maks titik", 
+                        min_value=100, 
+                        max_value=5000, 
+                        value=min(2000, len(df)),
+                        step=100
+                    )
+                
+                # Filter data
+                if filter_sp:
+                    df_map = df[df["species"].isin(filter_sp)].copy()
+                else:
+                    df_map = df.copy()
+                
+                # Batasi jumlah titik untuk performa
+                if len(df_map) > show_count:
+                    df_map = df_map.sample(n=show_count, random_state=42)
+                    st.info(f"📊 Menampilkan {show_count:,} dari {len(df):,} total pohon untuk performa optimal")
+                
+                if df_map.empty:
+                    st.warning("⚠️ Tidak ada pohon untuk ditampilkan dengan filter yang dipilih.")
+                else:
+                    # Tentukan koordinat pusat
+                    center_lat = params["map_lat"]
+                    center_lon = params["map_lon"]
+                    
+                    # Cek apakah ada koordinat dari GeoTIFF
+                    if meta.get("bounds"):
+                        try:
+                            bounds = meta["bounds"]
+                            if len(bounds) >= 4:
+                                left, bottom, right, top = bounds[0], bounds[1], bounds[2], bounds[3]
+                                center_lat = (bottom + top) / 2
+                                center_lon = (left + right) / 2
+                                st.info(f"📍 Menggunakan koordinat dari GeoTIFF: {center_lat:.5f}, {center_lon:.5f}")
+                        except Exception as e:
+                            st.warning(f"Gagal membaca koordinat GeoTIFF: {str(e)[:100]}")
+                    
+                    # Buat peta
+                    with st.spinner("🔄 Membangun peta distribusi..."):
+                        try:
+                            fig_map = build_plotly_map(
+                                df_map, 
+                                basemap,
+                                center_lat, 
+                                center_lon,
+                                params["map_zoom"], 
+                                gsd,
+                                None,  # img_origin_lat
+                                None,  # img_origin_lon
+                                meta
                             )
-                        else:
-                            st.error("Gagal membuat peta: tidak ada data yang dapat ditampilkan")
                             
-                    except Exception as e:
-                        st.error(f"Error saat membuat peta: {str(e)}")
-                        st.exception(e)
+                            # Tampilkan peta
+                            if fig_map and len(fig_map.data) > 0:
+                                st.plotly_chart(fig_map, use_container_width=True, config={'displayModeBar': True})
+                                
+                                # Informasi tambahan
+                                st.markdown("---")
+                                st.markdown("### ℹ️ Informasi Peta")
+                                info_col1, info_col2, info_col3 = st.columns(3)
+                                with info_col1:
+                                    st.markdown(f"**✅ Titik ditampilkan:** {len(df_map):,} pohon")
+                                with info_col2:
+                                    st.markdown(f"**📏 Jarak min antar pohon:** {params['min_dist']:.1f} m")
+                                with info_col3:
+                                    if meta.get("crs"):
+                                        crs_str = str(meta["crs"])[:50]
+                                        st.markdown(f"**🗺️ Sistem koordinat:** {crs_str}...")
+                                
+                                # Legenda
+                                st.markdown(
+                                    """
+                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #4CAF50;">
+                                    <small>
+                                    🎨 <b>Legenda:</b><br>
+                                    🔵 <b>Biru</b> = <i>Pinus merkusii</i> (Tusam)<br>
+                                    🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
+                                    📏 <b>Ukuran marker</b> = proporsional dengan diameter tajuk (ECD)<br>
+                                    🖱️ <b>Hover / Klik</b> pada titik untuk melihat detail pohon<br>
+                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta
+                                    </small>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                st.error("❌ Gagal membuat peta: tidak ada data yang dapat ditampilkan")
+                                st.info("💡 Tips: Coba kurangi filter atau refresh halaman")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Error saat membuat peta: {str(e)}")
+                            st.exception(e)
                 
                 # Statistik per spesies
-                st.markdown("---")
-                st.markdown("### 📈 Statistik per Spesies")
-                if not df_map.empty:
-                    sp_stats = df_map.groupby("species").agg({
+                if not df.empty:
+                    st.markdown("---")
+                    st.markdown("### 📈 Statistik per Spesies")
+                    
+                    stats_df = df.groupby("species").agg({
                         "id": "count",
-                        "height_m": "mean",
-                        "ecd_m": "mean",
+                        "height_m": ["mean", "std"],
+                        "ecd_m": ["mean", "std"],
                         "crown_area_m2": "mean",
                         "carbon_kg": "sum",
                         "co2e_kg": "sum"
                     }).round(2)
-                    sp_stats.columns = ["Jumlah", "Tinggi Rata-rata (m)", "ECD Rata-rata (m)", 
-                                        "Luas Tajuk Rata-rata (m²)", "Total Karbon (kg)", "Total CO₂e (kg)"]
-                    st.dataframe(sp_stats, use_container_width=True)
+                    
+                    # Rename columns
+                    stats_df.columns = ["Jumlah", "Tinggi (m)", "Std Tinggi", 
+                                        "ECD (m)", "Std ECD", 
+                                        "Luas Tajuk (m²)", "Total Karbon (kg)", "Total CO₂e (kg)"]
+                    
+                    st.dataframe(stats_df, use_container_width=True)
 
     # ── TAB 4: ANALISIS KARBON ───────────────────────────────
     with tabs[4]:
