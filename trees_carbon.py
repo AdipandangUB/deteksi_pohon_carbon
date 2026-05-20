@@ -1792,7 +1792,7 @@ def main():
             st.download_button(
                 "⬇ Download CSV (Data Lengkap)",
                 csv,
-                "ub_forest_hasil_deteksi.csv",
+                "hutan_hasil_deteksi.csv",
                 "text/csv",
                 use_container_width=True,
             )
