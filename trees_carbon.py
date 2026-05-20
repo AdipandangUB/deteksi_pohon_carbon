@@ -1076,8 +1076,7 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
 # MAP - DENGAN BASEMAP LENGKAP (OpenStreetMap, Satellite, Terrain)
 # ══════════════════════════════════════════════════════════════
 
-# Basemap styles yang tersedia
-# Untuk go.Scattermap (Plotly >=5.24)
+# Basemap styles yang tersedia untuk Plotly
 BASEMAP_STYLES = {
     "OpenStreetMap": {
         "style": "open-street-map",
@@ -1117,8 +1116,8 @@ BASEMAP_STYLES = {
     }
 }
 
-# Fallback untuk versi Plotly lama (menggunakan mapbox)
-BASEMAP_STYLES_FALLBACK = {
+# Fallback untuk versi Plotly lama
+BASEMAP_FALLBACK = {
     "OpenStreetMap": "open-street-map",
     "Satellite Imagery": "satellite",
     "Satellite Streets": "satellite-streets",
@@ -1143,18 +1142,17 @@ def build_plotly_map(df_trees: pd.DataFrame,
     Membangun peta distribusi pohon dengan berbagai pilihan basemap.
     """
     COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
-    rng       = np.random.default_rng(99)
+    rng = np.random.default_rng(99)
     
     df_plot = df_trees.head(3000).copy()
     
     if df_plot.empty:
-        st.warning("Tidak ada data pohon untuk ditampilkan")
         return go.Figure()
 
-    # ── Hitung koordinat setiap pohon ──────────────────────────
+    # Hitung koordinat setiap pohon
     lats, lons = [], []
     
-    # Cek apakah ada data koordinat dari GeoTIFF
+    # Cek UTM
     has_utm = False
     utm_epsg = None
     utm_bounds = None
@@ -1167,97 +1165,73 @@ def build_plotly_map(df_trees: pd.DataFrame,
         except Exception:
             pass
     
-    # Hitung koordinat untuk setiap pohon
-    for idx, row in df_plot.iterrows():
+    # Hitung koordinat
+    for _, row in df_plot.iterrows():
         try:
             if has_utm and utm_epsg and utm_bounds:
-                # Konversi UTM ke WGS84
                 minx, miny, maxx, maxy = utm_bounds
-                
                 if meta.get("original_size"):
                     orig_h, orig_w = meta["original_size"]
                     resized_h, resized_w = meta.get("resized_to", (orig_h, orig_w))
-                    
                     scale_h = orig_h / resized_h if resized_h > 0 else 1
                     scale_w = orig_w / resized_w if resized_w > 0 else 1
-                    
                     px = float(row["centroid_col"]) * scale_w
                     py = float(row["centroid_row"]) * scale_h
-                    
                     x_utm = minx + (px / orig_w) * (maxx - minx)
                     y_utm = maxy - (py / orig_h) * (maxy - miny)
-                    
                     lon, lat = convert_utm_to_wgs84(x_utm, y_utm, utm_epsg)
-                    
                     if lon is not None and lat is not None:
                         lats.append(lat)
                         lons.append(lon)
                     else:
-                        # Fallback
-                        angle = rng.uniform(0, 2 * math.pi)
-                        radius = rng.uniform(0, 0.002)
-                        lats.append(center_lat + radius * math.cos(angle))
-                        lons.append(center_lon + radius * math.sin(angle))
+                        lats.append(center_lat + rng.uniform(-0.001, 0.001))
+                        lons.append(center_lon + rng.uniform(-0.001, 0.001))
                 else:
-                    angle = rng.uniform(0, 2 * math.pi)
-                    radius = rng.uniform(0, 0.002)
-                    lats.append(center_lat + radius * math.cos(angle))
-                    lons.append(center_lon + radius * math.sin(angle))
+                    lats.append(center_lat + rng.uniform(-0.001, 0.001))
+                    lons.append(center_lon + rng.uniform(-0.001, 0.001))
             else:
-                # Metode sederhana
-                if img_origin_lat is not None and img_origin_lon is not None:
-                    lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111320.0
-                    lon = img_origin_lon + float(row["centroid_col"]) * gsd_m / (111320.0 * math.cos(math.radians(img_origin_lat)))
+                if img_origin_lat and img_origin_lon:
+                    lat = img_origin_lat - row["centroid_row"] * gsd_m / 111320.0
+                    lon = img_origin_lon + row["centroid_col"] * gsd_m / (111320.0 * math.cos(math.radians(img_origin_lat)))
                 else:
-                    angle = rng.uniform(0, 2 * math.pi)
-                    radius = rng.uniform(0, 0.002)
-                    lat = center_lat + radius * math.cos(angle)
-                    lon = center_lon + radius * math.sin(angle)
-                
+                    lat = center_lat + rng.uniform(-0.001, 0.001)
+                    lon = center_lon + rng.uniform(-0.001, 0.001)
                 lats.append(lat)
                 lons.append(lon)
-                
         except Exception:
-            # Fallback ke center
-            angle = rng.uniform(0, 2 * math.pi)
-            radius = rng.uniform(0, 0.002)
-            lats.append(center_lat + radius * math.cos(angle))
-            lons.append(center_lon + radius * math.sin(angle))
+            lats.append(center_lat + rng.uniform(-0.001, 0.001))
+            lons.append(center_lon + rng.uniform(-0.001, 0.001))
     
-    # Tambahkan koordinat ke dataframe
     df_plot = df_plot.copy()
     df_plot["lat"] = lats
     df_plot["lon"] = lons
     
-    # Validasi koordinat
-    valid_coords = df_plot["lat"].notna() & df_plot["lon"].notna()
-    df_plot = df_plot[valid_coords]
+    valid = df_plot["lat"].notna() & df_plot["lon"].notna()
+    df_plot = df_plot[valid]
     
     if df_plot.empty:
-        st.error("Tidak ada koordinat valid untuk ditampilkan")
         return go.Figure()
     
-    # Siapkan hover info
+    # Hover info
     df_plot["emoji"] = df_plot["species"].apply(lambda s: "🌲" if "Pinus" in s else "🌳")
     df_plot["hover"] = df_plot.apply(lambda r: (
         f"<b>{r['emoji']} {r['species']}</b><br>"
         f"ID: {int(r['id'])} | Tinggi: {r['height_m']:.1f} m<br>"
         f"ECD: {r['ecd_m']:.1f} m | Tajuk: {r['crown_area_m2']:.1f} m²<br>"
-        f"DBH: {r.get('dbh_cm', 0):.1f} cm | Vol: {r.get('volume_m3', 0):.4f} m³<br>"
-        f"Karbon: <b>{r.get('carbon_kg', 0):.1f} kg C</b> "
-        f"| CO₂e: {r.get('co2e_kg', 0):.1f} kg<br>"
+        f"DBH: {r.get('dbh_cm', 0):.1f} cm<br>"
+        f"Karbon: <b>{r.get('carbon_kg', 0):.1f} kg C</b><br>"
         f"Confidence: {r.get('confidence', 0):.1f}%"
     ), axis=1)
     
-    # Ukuran marker proporsional terhadap ECD
-    ecd = df_plot["ecd_m"].values.astype(float)
+    # Ukuran marker
+    ecd = df_plot["ecd_m"].values
     if ecd.max() > ecd.min():
         norm = (ecd - ecd.min()) / (ecd.max() - ecd.min() + 1e-6)
     else:
         norm = np.ones_like(ecd) * 0.5
     sizes = (norm * 14 + 8).tolist()
     
-    # Dapatkan style basemap
+    # Style basemap
     basemap_info = BASEMAP_STYLES.get(basemap_key, BASEMAP_STYLES["OpenStreetMap"])
     map_style = basemap_info["style"]
     
@@ -1268,13 +1242,12 @@ def build_plotly_map(df_trees: pd.DataFrame,
     plotly_ver = tuple(int(x) for x in plotly.__version__.split(".")[:2])
     use_new_api = plotly_ver >= (5, 24)
     
-    # Tambahkan trace untuk setiap spesies
+    # Tambahkan trace
     for sp in ["Pinus merkusii", "Swietenia mahagoni"]:
         mask = df_plot["species"] == sp
         if mask.sum() == 0:
             continue
-            
-        dsp = df_plot[mask].reset_index(drop=True)
+        dsp = df_plot[mask]
         szs = [sizes[i] for i, m in enumerate(mask) if m]
         color = COLOR_MAP[sp]
         emoji = "🌲" if "Pinus" in sp else "🌳"
@@ -1288,17 +1261,15 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 marker=go.scattermap.Marker(
                     size=szs,
                     color=color,
-                    opacity=0.85,
+                    opacity=0.8,
                     sizemode="diameter",
-                    symbol="circle",
                 ),
                 name=label,
                 text=dsp["hover"].tolist(),
                 hovertemplate="%{text}<extra></extra>",
             ))
         else:
-            # Fallback untuk versi lama
-            fallback_style = BASEMAP_STYLES_FALLBACK.get(basemap_key, "open-street-map")
+            fallback_style = BASEMAP_FALLBACK.get(basemap_key, "open-street-map")
             fig.add_trace(go.Scattermapbox(
                 lat=dsp["lat"].tolist(),
                 lon=dsp["lon"].tolist(),
@@ -1306,7 +1277,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 marker=go.scattermapbox.Marker(
                     size=szs,
                     color=color,
-                    opacity=0.85,
+                    opacity=0.8,
                     sizemode="diameter",
                 ),
                 name=label,
@@ -1315,7 +1286,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
             ))
             map_style = fallback_style
     
-    # Hitung center dari data
+    # Center
     if len(df_plot) > 0:
         map_center_lat = df_plot["lat"].median()
         map_center_lon = df_plot["lon"].median()
@@ -1323,26 +1294,19 @@ def build_plotly_map(df_trees: pd.DataFrame,
         map_center_lat = center_lat
         map_center_lon = center_lon
     
-    # Konfigurasi layout
     map_center = dict(lat=map_center_lat, lon=map_center_lon)
-    map_zoom = zoom
+    map_zoom = max(zoom - 1, 12)
     
+    # Layout
     if use_new_api:
-        # Konfigurasi untuk API baru
-        map_config = dict(
-            style=map_style,
-            center=map_center,
-            zoom=map_zoom,
-        )
-        
-        # Tambahkan kontrol peta
-        map_config["bearing"] = 0
-        map_config["pitch"] = 0
-        
         fig.update_layout(
-            map=map_config,
+            map=dict(
+                style=map_style,
+                center=map_center,
+                zoom=map_zoom,
+            ),
             margin=dict(l=0, r=0, t=40, b=0),
-            height=650,
+            height=600,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
                 bordercolor="#ccc",
@@ -1350,22 +1314,15 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 x=0.01, y=0.99,
                 xanchor="left", yanchor="top",
                 font=dict(size=12),
-                traceorder="normal",
             ),
             title={
                 'text': f"📍 Distribusi Pohon ({len(df_plot)} pohon)",
                 'x': 0.5,
                 'xanchor': 'center',
-                'font': {'size': 18, 'family': 'DM Sans', 'weight': 'bold'}
-            },
-            hoverlabel=dict(
-                bgcolor="white",
-                font_size=12,
-                font_family="DM Sans",
-            )
+                'font': {'size': 16}
+            }
         )
     else:
-        # Konfigurasi untuk API lama (mapbox)
         fig.update_layout(
             mapbox=dict(
                 style=map_style,
@@ -1373,7 +1330,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 zoom=map_zoom,
             ),
             margin=dict(l=0, r=0, t=40, b=0),
-            height=650,
+            height=600,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
                 bordercolor="#ccc",
@@ -1386,12 +1343,11 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 'text': f"📍 Distribusi Pohon ({len(df_plot)} pohon)",
                 'x': 0.5,
                 'xanchor': 'center',
-                'font': {'size': 18, 'family': 'DM Sans'}
+                'font': {'size': 16}
             }
         )
     
     return fig
-
 # ══════════════════════════════════════════════════════════════
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════
