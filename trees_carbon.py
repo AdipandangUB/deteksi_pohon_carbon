@@ -1235,19 +1235,13 @@ def main():
         st.info(f"""
 **Cara Menggunakan:**
 
-1. **Konfigurasi upload 300 MB** — buat file `.streamlit/config.toml`:
-   ```
-   [server]
-   maxUploadSize = 200
-   ```
+1. Upload foto udara di sidebar (GeoTIFF / JPG / PNG, maks **{MAX_UPLOAD_SIZE_MB} MB**)
 
-2. Upload foto udara di sidebar (GeoTIFF / JPG / PNG, maks **{MAX_UPLOAD_SIZE_MB} MB**)
+2. *(Opsional)* Upload sampel tajuk Pinus & Mahoni untuk kalibrasi spektral
 
-3. *(Opsional)* Upload sampel tajuk Pinus & Mahoni untuk kalibrasi spektral
+3. Atur parameter deteksi, lalu buka tab **Deteksi Pohon** → klik **Jalankan Deteksi**
 
-4. Atur parameter deteksi, lalu buka tab **Deteksi Pohon** → klik **Jalankan Deteksi**
-
-5. Hasil tersedia di tab: Mask R-CNN, Peta, Analisis Karbon, dan Ekspor
+4. Hasil tersedia di tab: Mask R-CNN, Peta, Analisis Karbon, dan Ekspor
 
 **Catatan file besar (>200 MB):**
 - Gambar otomatis diresize ke maks {MAX_PIXEL_DIM}px per sisi
