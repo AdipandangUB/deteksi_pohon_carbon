@@ -954,7 +954,7 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
 
 
 # ══════════════════════════════════════════════════════════════
-# HELPER: KONVERSI RGB KE BASE64 UNTUK IMAGE OVERLAY (TIDAK DIGUNAKAN LAGI)
+# HELPER: KONVERSI RGB KE BASE64 UNTUK IMAGE OVERLAY 
 # ══════════════════════════════════════════════════════════════
 
 def rgb_array_to_base64(rgb: np.ndarray, max_dim: int = 1024) -> str:
@@ -1360,7 +1360,7 @@ def main():
     <p><span class="badge">🛸 UAV Remote Sensing</span>
        <span class="badge">🌿 Forest</span>
        <span class="badge">📡 Mask R-CNN</span></p>
-    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB) | Ananda Nibras Naditya Lokiko (Spatial Forestry Analyst - Kehutanan UB)</small></p>
+    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer, Architecture System, Scrypt - PWK UB) | Ananda Nibras Naditya Lokiko (Data Acquisition, GIS Engineer - Kehutanan UB)</small></p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1388,9 +1388,7 @@ def main():
 4. Tab **Peta Distribusi**: lihat sebaran pohon di peta interaktif
 5. Tab **Ekspor**: download CSV dan **GeoJSON** (siap untuk QGIS/ArcGIS/WebGIS)
 
-**Catatan file besar (>200 MB):**
-- Gambar otomatis diresize ke maks {MAX_PIXEL_DIM}px per sisi
-- CHM dihitung pada resolusi maks 2048px lalu diupscale
+**Catatan file besar (mendekati 200 MB):**
 - Proses bisa memakan waktu 2–5 menit
         """)
 
