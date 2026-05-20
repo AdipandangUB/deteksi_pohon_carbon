@@ -14,7 +14,6 @@ Perbaikan:
 - Tab Analisis Karbon: guard untuk df kosong
 - Session state keys yang konsisten
 """
-
 import streamlit as st
 import numpy as np
 import pandas as pd
