@@ -3,7 +3,6 @@
 Deteksi Pohon & Estimasi Karbon — v2
 ============================================================
 Tambahan fitur:
-- Layer foto udara (image overlay) pada Tab Peta Distribusi
 - Ekspor GeoJSON pada Tab Ekspor
 """
 import streamlit as st
@@ -955,7 +954,7 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
 
 
 # ══════════════════════════════════════════════════════════════
-# HELPER: KONVERSI RGB KE BASE64 UNTUK IMAGE OVERLAY
+# HELPER: KONVERSI RGB KE BASE64 UNTUK IMAGE OVERLAY (TIDAK DIGUNAKAN LAGI)
 # ══════════════════════════════════════════════════════════════
 
 def rgb_array_to_base64(rgb: np.ndarray, max_dim: int = 1024) -> str:
@@ -1062,12 +1061,9 @@ def build_plotly_map(df_trees: pd.DataFrame,
                      gsd_m: float = 0.1,
                      img_origin_lat: Optional[float] = None,
                      img_origin_lon: Optional[float] = None,
-                     meta: Optional[dict] = None,
-                     show_image_overlay: bool = False,
-                     rgb_array: Optional[np.ndarray] = None,
-                     overlay_opacity: float = 0.7) -> go.Figure:
+                     meta: Optional[dict] = None) -> go.Figure:
     """
-    Membangun peta distribusi pohon dengan opsional layer foto udara.
+    Membangun peta distribusi pohon.
     """
     COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
     rng       = np.random.default_rng(99)
@@ -1192,58 +1188,6 @@ def build_plotly_map(df_trees: pd.DataFrame,
     use_new_api = plotly_ver >= (5, 24)
 
     fig = go.Figure()
-
-    # ── LAYER FOTO UDARA (IMAGE OVERLAY) ──────────────────────
-    if show_image_overlay and rgb_array is not None and meta is not None:
-        img_bounds = get_image_bounds_wgs84(meta)
-        if img_bounds is not None:
-            lat_min, lon_min, lat_max, lon_max = img_bounds
-            # Encode gambar ke base64
-            with st.spinner("🖼 Menyiapkan layer foto udara..."):
-                img_b64 = rgb_array_to_base64(rgb_array, max_dim=1024)
-
-            # Tambahkan sebagai image layer di layout
-            # Plotly mendukung image overlay melalui layout.images
-            fig.add_layout_image(
-                dict(
-                    source=f"data:image/png;base64,{img_b64}",
-                    xref="x", yref="y",
-                    x=lon_min, y=lat_max,
-                    sizex=lon_max - lon_min,
-                    sizey=lat_max - lat_min,
-                    sizing="stretch",
-                    opacity=overlay_opacity,
-                    layer="below",
-                )
-            )
-            st.success(f"✅ Layer foto udara ditambahkan: [{lat_min:.5f}, {lon_min:.5f}] → [{lat_max:.5f}, {lon_max:.5f}]")
-        else:
-            # Fallback: overlay berdasarkan koordinat pohon
-            if len(df_plot) > 0:
-                lat_min_t = df_plot["lat"].min()
-                lat_max_t = df_plot["lat"].max()
-                lon_min_t = df_plot["lon"].min()
-                lon_max_t = df_plot["lon"].max()
-                padding = 0.001
-                lat_min_t -= padding; lat_max_t += padding
-                lon_min_t -= padding; lon_max_t += padding
-
-                with st.spinner("🖼 Menyiapkan layer foto udara (estimasi bounds)..."):
-                    img_b64 = rgb_array_to_base64(rgb_array, max_dim=512)
-
-                fig.add_layout_image(
-                    dict(
-                        source=f"data:image/png;base64,{img_b64}",
-                        xref="x", yref="y",
-                        x=lon_min_t, y=lat_max_t,
-                        sizex=lon_max_t - lon_min_t,
-                        sizey=lat_max_t - lat_min_t,
-                        sizing="stretch",
-                        opacity=overlay_opacity,
-                        layer="below",
-                    )
-                )
-                st.info("ℹ️ Overlay foto udara menggunakan estimasi bounds berdasarkan sebaran pohon")
 
     # ── SCATTER POHON ──────────────────────────────────────────
     for sp in ["Pinus merkusii", "Swietenia mahagoni"]:
@@ -1441,7 +1385,7 @@ def main():
 1. Upload foto udara di sidebar (GeoTIFF / JPG / PNG, maks **{MAX_UPLOAD_SIZE_MB} MB**)
 2. *(Opsional)* Upload sampel tajuk Pinus & Mahoni untuk kalibrasi spektral
 3. Atur parameter deteksi, lalu buka tab **Deteksi Pohon** → klik **Jalankan Deteksi**
-4. Tab **Peta Distribusi**: aktifkan toggle *Layer Foto Udara* untuk overlay citra di atas peta
+4. Tab **Peta Distribusi**: lihat sebaran pohon di peta interaktif
 5. Tab **Ekspor**: download CSV dan **GeoJSON** (siap untuk QGIS/ArcGIS/WebGIS)
 
 **Catatan file besar (>200 MB):**
@@ -1622,7 +1566,6 @@ def main():
             df   = st.session_state["tree_df"]
             meta = st.session_state.get("meta", {})
             gsd  = st.session_state.get("gsd", params["gsd"])
-            rgb  = st.session_state.get("rgb", None)
 
             if df.empty:
                 st.warning("⚠️ Data pohon kosong.")
@@ -1653,39 +1596,6 @@ def main():
                         min_value=100, max_value=5000,
                         value=min(2000, len(df)), step=100
                     )
-
-                # ── KONTROL LAYER FOTO UDARA (BARU) ──────────────────
-                st.markdown("---")
-                st.markdown("### 🛸 Layer Foto Udara")
-                layer_col1, layer_col2 = st.columns([1, 2])
-                with layer_col1:
-                    show_aerial = st.toggle(
-                        "Tampilkan Layer Foto Udara",
-                        value=False,
-                        help="Overlay citra UAV di atas peta. Memerlukan koordinat GeoTIFF atau estimasi berdasarkan sebaran pohon."
-                    )
-                with layer_col2:
-                    overlay_opacity = st.slider(
-                        "Opasitas Overlay",
-                        min_value=0.1, max_value=1.0, value=0.7, step=0.05,
-                        disabled=not show_aerial,
-                        help="Atur transparansi layer foto udara (0 = transparan, 1 = opaque)"
-                    )
-
-                if show_aerial:
-                    if rgb is None:
-                        st.warning("⚠️ Data citra UAV tidak tersedia. Pastikan foto udara sudah diupload dan dideteksi.")
-                        show_aerial = False
-                    else:
-                        img_bounds = get_image_bounds_wgs84(meta)
-                        if img_bounds:
-                            lat_min, lon_min, lat_max, lon_max = img_bounds
-                            st.info(
-                                f"📍 Bounds foto udara (WGS84): "
-                                f"[{lat_min:.5f}°, {lon_min:.5f}°] → [{lat_max:.5f}°, {lon_max:.5f}°]"
-                            )
-                        else:
-                            st.info("ℹ️ Koordinat GeoTIFF tidak tersedia — overlay menggunakan estimasi sebaran pohon.")
 
                 # Filter data
                 if filter_sp:
@@ -1719,9 +1629,6 @@ def main():
                                 center_lat, center_lon,
                                 params["map_zoom"], gsd,
                                 None, None, meta,
-                                show_image_overlay=show_aerial,
-                                rgb_array=rgb if show_aerial else None,
-                                overlay_opacity=overlay_opacity,
                             )
 
                             if fig_map and len(fig_map.data) > 0:
@@ -1750,8 +1657,7 @@ def main():
                                     🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
                                     📏 <b>Ukuran marker</b> = proporsional dengan diameter tajuk (ECD)<br>
                                     🖱️ <b>Hover / Klik</b> pada titik untuk melihat detail pohon<br>
-                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta<br>
-                                    🛸 <b>Toggle "Layer Foto Udara"</b> untuk menampilkan citra UAV
+                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta
                                     </small>
                                     </div>
                                     """,
@@ -2027,7 +1933,6 @@ def main():
 fetch('ub_forest_pohon.geojson')
   .then(r => r.json())
   .then(data => L.geoJSON(data).addTo(map));
-```
 
 **Kolom utama dalam GeoJSON:**
 - `species`: Nama spesies (Pinus merkusii / Swietenia mahagoni)
