@@ -1,6 +1,6 @@
 """
 ============================================================
-Deteksi Pohon & Estimasi Karbon — VERSI STREAMLIT CLOUD
+Deteksi Pohon & Estimasi Karbon 
 ============================================================
 """
 
@@ -63,7 +63,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# === PERUBAHAN: Batas upload menjadi 300MB ===
+# === Batas upload sebesar 300MB ===
 MAX_UPLOAD_SIZE_MB = 300
 MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
@@ -917,7 +917,7 @@ def main():
         <h1>🌲 Deteksi Pohon & Estimasi Karbon</h1>
         <p>Estimasi Volume dan Nilai Simpanan Karbon Tegakan <i>Pinus merkusii</i>
         dan <i>Swietenia mahagoni</i> Menggunakan UAV</p>
-        <p><small>Credit: Dr. Adipandang Yudono | Ananda Nibras Naditya Lokiko</small></p>
+        <p><small>Credit: Dr. Adipandang Yudono (Dept. Perencanaan Wilayah & Kota - Universitas Brawijaya) | Ananda Nibras Naditya Lokiko (Prodi Kehutanan - Universitas Brawijaya)</small></p>
     </div>
     """, unsafe_allow_html=True)
 
