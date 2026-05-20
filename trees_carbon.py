@@ -33,6 +33,8 @@ import base64
 import json
 import time
 import gc
+import pyproj
+from pyproj import Transformer
 
 warnings.filterwarnings("ignore")
 
@@ -985,6 +987,43 @@ BASEMAP_OPTIONS = {
 }
 
 
+def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[float, float, float, float]]]:
+    """
+    Ekstrak informasi UTM zone dari metadata GeoTIFF.
+    Returns: (utm_epsg, (minx, miny, maxx, maxy)) atau (None, None)
+    """
+    crs_str = meta.get("crs", "")
+    bounds = meta.get("bounds")
+    
+    if not crs_str or not bounds:
+        return None, None
+    
+    # Deteksi UTM zone dari CRS
+    utm_epsg = None
+    if "UTM" in crs_str.upper():
+        import re
+        # Cari pattern seperti "zone 50S" atau "zone 49N"
+        zone_match = re.search(r'zone\s+(\d+)([NS])', crs_str, re.IGNORECASE)
+        if zone_match:
+            zone_num = int(zone_match.group(1))
+            hemisphere = zone_match.group(2)
+            epsg_code = 32700 + zone_num if hemisphere.upper() == 'S' else 32600 + zone_num
+            utm_epsg = f"EPSG:{epsg_code}"
+    
+    return utm_epsg, bounds
+
+def convert_utm_to_wgs84(x: float, y: float, utm_epsg: str) -> Tuple[float, float]:
+    """
+    Konversi koordinat UTM (x,y) ke WGS84 (lon, lat) menggunakan pyproj.
+    """
+    try:
+        transformer = Transformer.from_crs(utm_epsg, "EPSG:4326", always_xy=True)
+        lon, lat = transformer.transform(x, y)
+        return lon, lat
+    except Exception as e:
+        st.warning(f"Konversi koordinat gagal: {str(e)[:100]}")
+        return None, None
+
 def build_plotly_map(df_trees: pd.DataFrame,
                      basemap_key: str,
                      center_lat: float = UB_FOREST_LAT,
@@ -992,11 +1031,10 @@ def build_plotly_map(df_trees: pd.DataFrame,
                      zoom: int = 14,
                      gsd_m: float = 0.1,
                      img_origin_lat: Optional[float] = None,
-                     img_origin_lon: Optional[float] = None) -> go.Figure:
+                     img_origin_lon: Optional[float] = None,
+                     meta: Optional[dict] = None) -> go.Figure:
     """
-    Membangun peta distribusi pohon menggunakan go.Scattermap
-    (Plotly >=5.24, tidak butuh Mapbox token).
-    Fallback ke go.Scattermapbox jika versi Plotly lebih lama.
+    Membangun peta distribusi pohon dengan konversi UTM ke WGS84.
     """
     COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
     rng       = np.random.default_rng(99)
@@ -1005,18 +1043,73 @@ def build_plotly_map(df_trees: pd.DataFrame,
     if df_plot.empty:
         return go.Figure()
 
-    # ── Hitung koordinat setiap pohon ──────────────────────────
+    # ── Deteksi dan konversi koordinat UTM ──────────────────────────
     lats, lons = [], []
-    for _, row in df_plot.iterrows():
-        if img_origin_lat is not None and img_origin_lon is not None:
-            lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111_320.0
-            lon = (img_origin_lon + float(row["centroid_col"]) * gsd_m
-                   / (111_320.0 * math.cos(math.radians(img_origin_lat))))
-        else:
-            lat = center_lat + rng.uniform(-0.0025, 0.0025)
-            lon = center_lon + rng.uniform(-0.0035, 0.0035)
-        lats.append(lat)
-        lons.append(lon)
+    utm_epsg, utm_bounds = None, None
+    
+    # Cek apakah metadata memiliki informasi UTM
+    if meta:
+        utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
+    
+    # Jika ada UTM bounds dan kita bisa menentukan resolusi piksel
+    if utm_epsg and utm_bounds and meta.get("original_size"):
+        try:
+            minx, miny, maxx, maxy = utm_bounds
+            orig_h, orig_w = meta["original_size"]
+            resized_h, resized_w = meta.get("resized_to", (orig_h, orig_w))
+            
+            # Hitung faktor skala
+            scale_h = orig_h / resized_h
+            scale_w = orig_w / resized_w
+            
+            # Konversi untuk setiap pohon
+            for _, row in df_plot.iterrows():
+                # Koordinat piksel dalam citra yang sudah diresize
+                px = float(row["centroid_col"]) * scale_w
+                py = float(row["centroid_row"]) * scale_h
+                
+                # Konversi piksel ke koordinat UTM
+                x_utm = minx + (px / orig_w) * (maxx - minx)
+                y_utm = maxy - (py / orig_h) * (maxy - miny)  # Invers Y
+                
+                # Konversi UTM ke WGS84
+                lon, lat = convert_utm_to_wgs84(x_utm, y_utm, utm_epsg)
+                
+                if lon is not None and lat is not None:
+                    lats.append(lat)
+                    lons.append(lon)
+                else:
+                    # Fallback ke metode random jika konversi gagal
+                    lats.append(center_lat + rng.uniform(-0.0025, 0.0025))
+                    lons.append(center_lon + rng.uniform(-0.0035, 0.0035))
+            
+            st.success(f"✅ Berhasil mengkonversi koordinat dari {utm_epsg} ke WGS84")
+            
+        except Exception as e:
+            st.warning(f"Gagal konversi UTM: {str(e)[:150]}. Menggunakan metode fallback.")
+            # Fallback ke metode lama
+            for _, row in df_plot.iterrows():
+                if img_origin_lat is not None and img_origin_lon is not None:
+                    lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111_320.0
+                    lon = (img_origin_lon + float(row["centroid_col"]) * gsd_m
+                           / (111_320.0 * math.cos(math.radians(img_origin_lat))))
+                else:
+                    lat = center_lat + rng.uniform(-0.0025, 0.0025)
+                    lon = center_lon + rng.uniform(-0.0035, 0.0035)
+                lats.append(lat)
+                lons.append(lon)
+    else:
+        # Metode lama (tanpa UTM)
+        for _, row in df_plot.iterrows():
+            if img_origin_lat is not None and img_origin_lon is not None:
+                lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111_320.0
+                lon = (img_origin_lon + float(row["centroid_col"]) * gsd_m
+                       / (111_320.0 * math.cos(math.radians(img_origin_lat))))
+            else:
+                lat = center_lat + rng.uniform(-0.0025, 0.0025)
+                lon = center_lon + rng.uniform(-0.0035, 0.0035)
+            lats.append(lat)
+            lons.append(lon)
 
     df_plot = df_plot.copy()
     df_plot["lat"]   = lats
@@ -1034,13 +1127,16 @@ def build_plotly_map(df_trees: pd.DataFrame,
 
     # Ukuran marker proporsional terhadap ECD (diameter tajuk)
     ecd   = df_plot["ecd_m"].values.astype(float)
-    norm  = (ecd - ecd.min()) / (ecd.max() - ecd.min() + 1e-6)
+    if ecd.max() > ecd.min():
+        norm  = (ecd - ecd.min()) / (ecd.max() - ecd.min() + 1e-6)
+    else:
+        norm = np.ones_like(ecd) * 0.5
     sizes = (norm * 14 + 6).tolist()   # range 6–20 px
 
     px_style = BASEMAP_OPTIONS.get(basemap_key, "open-street-map")
     fig      = go.Figure()
 
-    # ── Coba go.Scattermap (Plotly ≥5.24) ─────────────────────
+    # ── Cek versi Plotly ─────────────────────────────────────
     import plotly
     plotly_ver = tuple(int(x) for x in plotly.__version__.split(".")[:2])
     use_new_api = plotly_ver >= (5, 24)
@@ -1071,7 +1167,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 hovertemplate="%{text}<extra></extra>",
             ))
         else:
-            # Fallback: Scattermapbox (butuh open-street-map style)
+            # Fallback: Scattermapbox
             fig.add_trace(go.Scattermapbox(
                 lat=dsp["lat"].tolist(),
                 lon=dsp["lon"].tolist(),
@@ -1088,8 +1184,16 @@ def build_plotly_map(df_trees: pd.DataFrame,
             ))
 
     # ── Layout ────────────────────────────────────────────────
-    map_center = dict(lat=center_lat, lon=center_lon)
-    map_zoom_v = max(zoom - 1, 1)
+    # Hitung center dari data jika tersedia
+    if df_plot["lat"].notna().any() and df_plot["lon"].notna().any():
+        map_center_lat = df_plot["lat"].median()
+        map_center_lon = df_plot["lon"].median()
+    else:
+        map_center_lat = center_lat
+        map_center_lon = center_lon
+    
+    map_center = dict(lat=map_center_lat, lon=map_center_lon)
+    map_zoom_v = max(zoom - 1, 10)
 
     if use_new_api:
         fig.update_layout(
@@ -1102,7 +1206,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
     else:
         fig.update_layout(
             mapbox=dict(
-                style="open-street-map",   # satu-satunya style bebas token di API lama
+                style="open-street-map",
                 center=map_center,
                 zoom=map_zoom_v,
             ),
