@@ -35,6 +35,105 @@ import gc
 import pyproj
 from pyproj import Transformer
 
+def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[float, float, float, float]]]:
+    """
+    Ekstrak informasi UTM zone dari metadata GeoTIFF.
+    Returns: (utm_epsg, (minx, miny, maxx, maxy)) atau (None, None)
+    """
+    crs_str = meta.get("crs", "")
+    bounds = meta.get("bounds")
+    
+    if not crs_str or not bounds:
+        return None, None
+    
+    # Deteksi UTM zone dari CRS string
+    utm_epsg = None
+    try:
+        # Cari pattern UTM zone dari CRS string
+        import re
+        
+        # Pattern untuk UTM zone (misal: "zone 49S" atau "UTM zone 49S")
+        zone_match = re.search(r'zone\s+(\d+)([NS])', crs_str, re.IGNORECASE)
+        if zone_match:
+            zone_num = int(zone_match.group(1))
+            hemisphere = zone_match.group(2).upper()
+            # EPSG: 32600 + zone untuk Utara, 32700 + zone untuk Selatan
+            if hemisphere == 'S':
+                epsg_code = 32700 + zone_num
+            else:
+                epsg_code = 32600 + zone_num
+            utm_epsg = f"EPSG:{epsg_code}"
+        else:
+            # Coba cari EPSG code langsung
+            epsg_match = re.search(r'EPSG[":\s]+(\d+)', crs_str, re.IGNORECASE)
+            if epsg_match:
+                epsg_code = int(epsg_match.group(1))
+                # Cek apakah ini EPSG UTM (32600-32799)
+                if 32600 <= epsg_code <= 32799:
+                    utm_epsg = f"EPSG:{epsg_code}"
+                    
+    except Exception as e:
+        st.warning(f"Gagal mengekstrak UTM zone: {str(e)[:100]}")
+    
+    # Jika tidak ditemukan UTM, coba gunakan proj string
+    if not utm_epsg and '+proj=utm' in crs_str.lower():
+        try:
+            import re
+            zone_match = re.search(r'\+zone=(\d+)', crs_str, re.IGNORECASE)
+            if zone_match:
+                zone_num = int(zone_match.group(1))
+                # Cek hemisphere dari +south parameter
+                if '+south' in crs_str.lower():
+                    utm_epsg = f"EPSG:{32700 + zone_num}"
+                else:
+                    utm_epsg = f"EPSG:{32600 + zone_num}"
+        except:
+            pass
+    
+    # Ekstrak bounds
+    try:
+        if hasattr(bounds, 'left'):
+            minx = float(bounds.left)
+            miny = float(bounds.bottom)
+            maxx = float(bounds.right)
+            maxy = float(bounds.top)
+        else:
+            # Jika bounds adalah tuple/list
+            if len(bounds) >= 4:
+                minx = float(bounds[0])
+                miny = float(bounds[1])
+                maxx = float(bounds[2])
+                maxy = float(bounds[3])
+            else:
+                return utm_epsg, None
+                
+        return utm_epsg, (minx, miny, maxx, maxy)
+    except Exception as e:
+        st.warning(f"Gagal mengekstrak bounds: {str(e)[:100]}")
+        return utm_epsg, None
+
+
+def convert_utm_to_wgs84(x: float, y: float, utm_epsg: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Konversi koordinat UTM (x,y) ke WGS84 (lon, lat) menggunakan pyproj.
+    """
+    try:
+        from pyproj import Transformer
+        transformer = Transformer.from_crs(utm_epsg, "EPSG:4326", always_xy=True)
+        lon, lat = transformer.transform(x, y)
+        return lon, lat
+    except Exception as e:
+        # Fallback: jika pyproj error, coba dengan format EPSG yang berbeda
+        try:
+            # Coba tanpa huruf 'EPSG:'
+            epsg_num = utm_epsg.replace('EPSG:', '')
+            transformer = Transformer.from_crs(f"EPSG:{epsg_num}", "EPSG:4326", always_xy=True)
+            lon, lat = transformer.transform(x, y)
+            return lon, lat
+        except Exception as e2:
+            # Silent fail, akan menggunakan fallback
+            return None, None
+
 warnings.filterwarnings("ignore")
 
 # ── Konfigurasi halaman harus PERTAMA ──────────────────────────
@@ -985,7 +1084,6 @@ BASEMAP_OPTIONS = {
     "Carto Dark":      "carto-darkmatter",
 }
 
-
 def build_plotly_map(df_trees: pd.DataFrame,
                      basemap_key: str,
                      center_lat: float = UB_FOREST_LAT,
@@ -1016,19 +1114,29 @@ def build_plotly_map(df_trees: pd.DataFrame,
     
     # Cek apakah ada data koordinat dari GeoTIFF
     has_utm = False
+    utm_epsg = None
+    utm_bounds = None
+    
     if meta:
-        st.write(f"Debug: Metadata tersedia - CRS: {meta.get('crs', 'Tidak ada')}")
+        st.write(f"Debug: Metadata tersedia - CRS: {str(meta.get('crs', 'Tidak ada'))[:200]}...")
         st.write(f"Debug: Bounds: {meta.get('bounds', 'Tidak ada')}")
         
         # Coba ekstrak UTM
-        utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
-        if utm_epsg and utm_bounds:
-            has_utm = True
-            st.success(f"✅ Deteksi UTM: {utm_epsg}")
-            st.write(f"Debug: UTM Bounds: {utm_bounds}")
+        try:
+            utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
+            if utm_epsg and utm_bounds:
+                has_utm = True
+                st.success(f"✅ Deteksi UTM: {utm_epsg}")
+                st.write(f"Debug: UTM Bounds: {utm_bounds}")
+            else:
+                st.info("ℹ️ Tidak mendeteksi sistem koordinat UTM, menggunakan metode fallback")
+        except Exception as e:
+            st.warning(f"Error ekstraksi UTM: {str(e)[:100]}")
     
     # Hitung koordinat untuk setiap pohon
     error_count = 0
+    success_count = 0
+    
     for idx, row in df_plot.iterrows():
         try:
             if has_utm and utm_epsg and utm_bounds:
@@ -1058,6 +1166,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                     if lon is not None and lat is not None:
                         lats.append(lat)
                         lons.append(lon)
+                        success_count += 1
                     else:
                         # Fallback ke metode sederhana
                         lat = center_lat + rng.uniform(-0.0005, 0.0005)
@@ -1071,6 +1180,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
                     lon = center_lon + rng.uniform(-0.0005, 0.0005)
                     lats.append(lat)
                     lons.append(lon)
+                    error_count += 1
             else:
                 # Metode sederhana berdasarkan GSD
                 if img_origin_lat is not None and img_origin_lon is not None:
@@ -1086,18 +1196,21 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 
                 lats.append(lat)
                 lons.append(lon)
+                success_count += 1
                 
         except Exception as e:
-            st.warning(f"Error pada pohon {idx}: {str(e)[:100]}")
+            st.warning(f"Error pada pohon {idx}: {str(e)[:50]}")
             # Fallback ke center
-            lats.append(center_lat + rng.uniform(-0.0005, 0.0005))
-            lons.append(center_lon + rng.uniform(-0.0005, 0.0005))
+            lat = center_lat + rng.uniform(-0.0005, 0.0005)
+            lon = center_lon + rng.uniform(-0.0005, 0.0005)
+            lats.append(lat)
+            lons.append(lon)
             error_count += 1
     
+    if success_count > 0:
+        st.success(f"✅ Berhasil menghitung koordinat untuk {success_count} pohon")
     if error_count > 0:
         st.info(f"ℹ️ {error_count} pohon menggunakan koordinat fallback")
-    
-    st.write(f"Debug: Berhasil menghitung {len(lats)} koordinat")
     
     # Tambahkan koordinat ke dataframe
     df_plot = df_plot.copy()
@@ -1195,7 +1308,7 @@ def build_plotly_map(df_trees: pd.DataFrame,
     
     # Konfigurasi layout
     map_center = dict(lat=map_center_lat, lon=map_center_lon)
-    map_zoom = max(zoom - 1, 12)  # Zoom level yang lebih masuk akal
+    map_zoom = max(zoom - 1, 12)
     
     if use_new_api:
         fig.update_layout(
