@@ -1,18 +1,10 @@
 """
 ============================================================
-Deteksi Pohon & Estimasi Karbon 
+Deteksi Pohon & Estimasi Karbon — v2
 ============================================================
-Perbaikan:
-- streamlit server max upload size dikonfigurasi via .streamlit/config.toml (bukan env var)
-- Temporary file cleanup yang aman (delete=False + manual delete)
-- gc.collect() yang lebih agresif dan konsisten
-- Validasi ukuran file via seek() yang lebih handal
-- Error handling yang lebih baik di semua fungsi baca
-- Fallback regionprops yang diperbaiki (menerima labels saja, bukan positional args)
-- read_large_tiff_chunked tidak bergantung pada skimage jika HAS_SKIMAGE = False
-- render_maskrcnn_overlay: font default PIL digunakan (tidak ada import font gagal)
-- Tab Analisis Karbon: guard untuk df kosong
-- Session state keys yang konsisten
+Tambahan fitur:
+- Layer foto udara (image overlay) pada Tab Peta Distribusi
+- Ekspor GeoJSON pada Tab Ekspor
 """
 import streamlit as st
 import numpy as np
@@ -36,61 +28,42 @@ import pyproj
 from pyproj import Transformer
 
 def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[float, float, float, float]]]:
-    """
-    Ekstrak informasi UTM zone dari metadata GeoTIFF.
-    Returns: (utm_epsg, (minx, miny, maxx, maxy)) atau (None, None)
-    """
     crs_str = meta.get("crs", "")
     bounds = meta.get("bounds")
-    
     if not crs_str or not bounds:
         return None, None
-    
-    # Deteksi UTM zone dari CRS string
     utm_epsg = None
     try:
-        # Cari pattern UTM zone dari CRS string
         import re
-        
-        # Pattern untuk UTM zone (misal: "zone 49S" atau "UTM zone 49S")
         zone_match = re.search(r'zone\s+(\d+)([NS])', crs_str, re.IGNORECASE)
         if zone_match:
             zone_num = int(zone_match.group(1))
             hemisphere = zone_match.group(2).upper()
-            # EPSG: 32600 + zone untuk Utara, 32700 + zone untuk Selatan
             if hemisphere == 'S':
                 epsg_code = 32700 + zone_num
             else:
                 epsg_code = 32600 + zone_num
             utm_epsg = f"EPSG:{epsg_code}"
         else:
-            # Coba cari EPSG code langsung
             epsg_match = re.search(r'EPSG[":\s]+(\d+)', crs_str, re.IGNORECASE)
             if epsg_match:
                 epsg_code = int(epsg_match.group(1))
-                # Cek apakah ini EPSG UTM (32600-32799)
                 if 32600 <= epsg_code <= 32799:
                     utm_epsg = f"EPSG:{epsg_code}"
-                    
     except Exception as e:
         st.warning(f"Gagal mengekstrak UTM zone: {str(e)[:100]}")
-    
-    # Jika tidak ditemukan UTM, coba gunakan proj string
     if not utm_epsg and '+proj=utm' in crs_str.lower():
         try:
             import re
             zone_match = re.search(r'\+zone=(\d+)', crs_str, re.IGNORECASE)
             if zone_match:
                 zone_num = int(zone_match.group(1))
-                # Cek hemisphere dari +south parameter
                 if '+south' in crs_str.lower():
                     utm_epsg = f"EPSG:{32700 + zone_num}"
                 else:
                     utm_epsg = f"EPSG:{32600 + zone_num}"
         except:
             pass
-    
-    # Ekstrak bounds
     try:
         if hasattr(bounds, 'left'):
             minx = float(bounds.left)
@@ -98,7 +71,6 @@ def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[
             maxx = float(bounds.right)
             maxy = float(bounds.top)
         else:
-            # Jika bounds adalah tuple/list
             if len(bounds) >= 4:
                 minx = float(bounds[0])
                 miny = float(bounds[1])
@@ -106,7 +78,6 @@ def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[
                 maxy = float(bounds[3])
             else:
                 return utm_epsg, None
-                
         return utm_epsg, (minx, miny, maxx, maxy)
     except Exception as e:
         st.warning(f"Gagal mengekstrak bounds: {str(e)[:100]}")
@@ -114,29 +85,22 @@ def extract_utm_from_geotiff(meta: dict) -> Tuple[Optional[str], Optional[Tuple[
 
 
 def convert_utm_to_wgs84(x: float, y: float, utm_epsg: str) -> Tuple[Optional[float], Optional[float]]:
-    """
-    Konversi koordinat UTM (x,y) ke WGS84 (lon, lat) menggunakan pyproj.
-    """
     try:
         from pyproj import Transformer
         transformer = Transformer.from_crs(utm_epsg, "EPSG:4326", always_xy=True)
         lon, lat = transformer.transform(x, y)
         return lon, lat
     except Exception as e:
-        # Fallback: jika pyproj error, coba dengan format EPSG yang berbeda
         try:
-            # Coba tanpa huruf 'EPSG:'
             epsg_num = utm_epsg.replace('EPSG:', '')
             transformer = Transformer.from_crs(f"EPSG:{epsg_num}", "EPSG:4326", always_xy=True)
             lon, lat = transformer.transform(x, y)
             return lon, lat
         except Exception as e2:
-            # Silent fail, akan menggunakan fallback
             return None, None
 
 warnings.filterwarnings("ignore")
 
-# ── Konfigurasi halaman harus PERTAMA ──────────────────────────
 st.set_page_config(
     page_title="UB Forest – Deteksi & Karbon",
     page_icon="🌲",
@@ -144,7 +108,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CSS ────────────────────────────────────────────────────────
 HEADER_BG_URL = "https://environesia.co.id/uploads/blog/20250429094811-2025-04-29blog094800.jpg"
 
 st.markdown(f"""
@@ -166,17 +129,11 @@ html, body, [class*="css"] {{ font-family: 'DM Sans', sans-serif; }}
     overflow: hidden;
     min-height: 180px;
 }}
-/* overlay gelap agar teks tetap terbaca */
 .main-header::before {{
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(
-        135deg,
-        rgba(13, 51, 24, 0.72) 0%,
-        rgba(26, 92, 42, 0.60) 50%,
-        rgba(10, 40, 18, 0.75) 100%
-    );
+    background: linear-gradient(135deg, rgba(13,51,24,0.72) 0%, rgba(26,92,42,0.60) 50%, rgba(10,40,18,0.75) 100%);
     border-radius: 16px;
     z-index: 0;
 }}
@@ -216,20 +173,11 @@ html, body, [class*="css"] {{ font-family: 'DM Sans', sans-serif; }}
 </style>
 """, unsafe_allow_html=True)
 
-# ── Batas ukuran upload ────────────────────────────────────────
 MAX_UPLOAD_SIZE_MB  = 200
 MAX_UPLOAD_BYTES    = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-CHUNK_SIZE          = 50 * 1024 * 1024   # 50 MB per chunk
-MAX_PIXEL_DIM       = 4000               # downscale jika lebih besar
+CHUNK_SIZE          = 50 * 1024 * 1024
+MAX_PIXEL_DIM       = 4000
 
-# CATATAN: Untuk mengaktifkan upload 300 MB di Streamlit, buat file
-#   .streamlit/config.toml  dengan isi:
-#   [server]
-#   maxUploadSize = 200
-
-# ══════════════════════════════════════════════════════════════
-# CONSTANTS
-# ══════════════════════════════════════════════════════════════
 SPECIES_PARAMS: Dict[str, dict] = {
     "Pinus merkusii": {
         "color": "#2196F3", "emoji": "🌲",
@@ -257,9 +205,6 @@ UB_FOREST_LAT  = -7.8754
 UB_FOREST_LON  = 112.5853
 UB_FOREST_ZOOM = 15
 
-# ══════════════════════════════════════════════════════════════
-# OPTIONAL LIBRARY DETECTION
-# ══════════════════════════════════════════════════════════════
 HAS_RASTERIO = False
 HAS_TIFFFILE = False
 HAS_SCIPY    = False
@@ -294,12 +239,8 @@ try:
 except ImportError:
     pass
 
-# ══════════════════════════════════════════════════════════════
-# FALLBACK FUNCTIONS
-# ══════════════════════════════════════════════════════════════
 
 def _gaussian_filter(image: np.ndarray, sigma: float = 1.0) -> np.ndarray:
-    """Gaussian filter dengan scipy atau PIL fallback."""
     if sigma <= 0:
         return image
     if HAS_SCIPY:
@@ -314,7 +255,6 @@ def _peak_local_max(image: np.ndarray, min_distance: int = 10,
                     threshold_abs: float = 0.0,
                     exclude_border: bool = False,
                     num_peaks: int = 10000) -> np.ndarray:
-    """Deteksi puncak lokal."""
     if HAS_SKIMAGE:
         return ski_peak_local_max(
             image, min_distance=min_distance,
@@ -344,10 +284,8 @@ def _peak_local_max(image: np.ndarray, min_distance: int = 10,
 def _watershed(image: np.ndarray, markers: np.ndarray,
                mask: Optional[np.ndarray] = None,
                compactness: float = 0.0) -> np.ndarray:
-    """Watershed segmentation."""
     if HAS_SKIMAGE:
         return ski_watershed(-image, markers, mask=mask, compactness=compactness)
-    # Simple dilation fallback
     from scipy.ndimage import binary_dilation
     labels = np.zeros_like(image, dtype=np.int32)
     peak_locs = np.argwhere(markers > 0)
@@ -371,7 +309,6 @@ def _watershed(image: np.ndarray, markers: np.ndarray,
 
 def _regionprops(labels: np.ndarray,
                  intensity_image: Optional[np.ndarray] = None) -> list:
-    """Region properties."""
     if HAS_SKIMAGE:
         return ski_regionprops(labels, intensity_image=intensity_image)
     if not HAS_SCIPY:
@@ -405,12 +342,7 @@ def _regionprops(labels: np.ndarray,
     return props_list
 
 
-# ══════════════════════════════════════════════════════════════
-# NORMALISASI BAND
-# ══════════════════════════════════════════════════════════════
-
 def _normalize_band(arr: np.ndarray, pct_hi: int = 98) -> np.ndarray:
-    """Normalisasi band ke uint8 dengan clipping persentil."""
     arr = arr.astype(np.float32)
     pos = arr[arr > 0]
     if pos.size:
@@ -425,10 +357,6 @@ def _normalize_band(arr: np.ndarray, pct_hi: int = 98) -> np.ndarray:
     return arr.astype(np.uint8)
 
 
-# ══════════════════════════════════════════════════════════════
-# RESIZE HELPER
-# ══════════════════════════════════════════════════════════════
-
 def _maybe_resize_rgb(rgb: np.ndarray, max_dim: int = MAX_PIXEL_DIM) -> np.ndarray:
     h, w = rgb.shape[:2]
     if max(h, w) <= max_dim:
@@ -438,12 +366,7 @@ def _maybe_resize_rgb(rgb: np.ndarray, max_dim: int = MAX_PIXEL_DIM) -> np.ndarr
     return np.array(Image.fromarray(rgb).resize((new_w, new_h), Image.LANCZOS))
 
 
-# ══════════════════════════════════════════════════════════════
-# PEMBACAAN FILE
-# ══════════════════════════════════════════════════════════════
-
 def _read_geotiff_rasterio(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
-    """Baca GeoTIFF dengan rasterio dari bytes."""
     meta: dict = {}
     try:
         with RasterioMemFile(data) as memfile:
@@ -494,17 +417,14 @@ def _read_geotiff_rasterio(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
 
 
 def _read_tiff_tifffile(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
-    """Baca TIFF dengan tifffile melalui temporary file (aman untuk file besar)."""
     tmp_path = None
     try:
-        # Tulis ke temp file dalam chunks
         with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
             tmp_path = tmp.name
             for offset in range(0, len(data), CHUNK_SIZE):
                 tmp.write(data[offset: offset + CHUNK_SIZE])
 
         img_data = tifffile.imread(tmp_path)
-
         h_orig = img_data.shape[0]
         w_orig = img_data.shape[1] if img_data.ndim > 1 else 1
 
@@ -514,7 +434,6 @@ def _read_tiff_tifffile(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
             "driver": "TIFF",
         }
 
-        # Downscale jika perlu (PIL resize, tidak bergantung skimage)
         if max(h_orig, w_orig) > MAX_PIXEL_DIM:
             scale = MAX_PIXEL_DIM / max(h_orig, w_orig)
             new_h = max(1, int(h_orig * scale))
@@ -531,7 +450,6 @@ def _read_tiff_tifffile(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
                 img_pil = Image.fromarray(img_data).resize((new_w, new_h), Image.LANCZOS)
                 img_data = np.array(img_pil)
 
-        # Konversi ke float untuk normalisasi
         if img_data.ndim == 3 and img_data.shape[2] >= 3:
             r = img_data[:, :, 0].astype(np.float32)
             g = img_data[:, :, 1].astype(np.float32)
@@ -565,12 +483,7 @@ def _read_tiff_tifffile(data: bytes) -> Tuple[Optional[np.ndarray], dict]:
                 pass
 
 
-# ══════════════════════════════════════════════════════════════
-# VALIDASI & LOAD UTAMA
-# ══════════════════════════════════════════════════════════════
-
 def _get_file_size(uploaded_file) -> int:
-    """Ukuran file dalam bytes menggunakan seek (tidak mem-buffer seluruh file)."""
     uploaded_file.seek(0, 2)
     size = uploaded_file.tell()
     uploaded_file.seek(0)
@@ -578,7 +491,6 @@ def _get_file_size(uploaded_file) -> int:
 
 
 def validate_file_size(uploaded_file, label: str = "File") -> Tuple[bool, float]:
-    """Validasi ukuran file. Kembalikan (valid, size_mb)."""
     if uploaded_file is None:
         return True, 0.0
     size_bytes = _get_file_size(uploaded_file)
@@ -601,11 +513,6 @@ def _fmt_mb(mb: float) -> str:
 
 
 def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
-    """
-    Muat gambar dari upload. Kembalikan (rgb_uint8_HxWx3, meta_dict).
-    Meta dict mengandung: width, height, bands, driver, gsd_m, file_size_mb,
-    file_size_display, bounds, original_size, resized_to, crs.
-    """
     base_meta: dict = {
         "width": 0, "height": 0, "bands": 0, "crs": None,
         "transform": None, "driver": "unknown", "gsd_m": None,
@@ -626,7 +533,6 @@ def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
     st.info(f"📁 Memproses: {uploaded_file.name} ({base_meta['file_size_display']})")
 
     data = uploaded_file.read()
-
     is_tiff = name.endswith((".tif", ".tiff", ".geotiff", ".jp2"))
 
     if is_tiff:
@@ -653,7 +559,6 @@ def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
         st.error("❌ Gagal membaca file TIFF. Pastikan rasterio atau tifffile terinstall.")
         return None, base_meta
 
-    # ── JPG / PNG / format lain ──────────────────────────────
     try:
         st.info("📸 Membaca sebagai gambar biasa…")
         img = Image.open(io.BytesIO(data))
@@ -676,7 +581,6 @@ def load_image_array(uploaded_file) -> Tuple[Optional[np.ndarray], dict]:
 
 
 def load_sample_image(uploaded_file, label: str = "Sampel") -> Optional[np.ndarray]:
-    """Muat gambar sampel untuk referensi spektral spesies."""
     if uploaded_file is None:
         return None
     valid, _ = validate_file_size(uploaded_file, label)
@@ -701,15 +605,9 @@ def load_sample_image(uploaded_file, label: str = "Sampel") -> Optional[np.ndarr
         return None
 
 
-# ══════════════════════════════════════════════════════════════
-# CHM SIMULATION
-# ══════════════════════════════════════════════════════════════
-
 def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
                           gsd_m: float = 0.1) -> np.ndarray:
     h, w = rgb.shape[:2]
-
-    # Downscale CHM work array jika terlalu besar
     chm_max = 2048
     if max(h, w) > chm_max:
         scale   = chm_max / max(h, w)
@@ -751,10 +649,6 @@ def rgb_to_simulated_chm(rgb: np.ndarray, sigma: float = 2.0,
     return chm.astype(np.float32)
 
 
-# ══════════════════════════════════════════════════════════════
-# TREE DETECTION
-# ══════════════════════════════════════════════════════════════
-
 def detect_trees(chm: np.ndarray, min_height: float = 3.0,
                  min_distance_px: int = 15, gsd_m: float = 0.1):
     chm_masked = chm.copy()
@@ -792,7 +686,7 @@ def extract_tree_metrics(labels: np.ndarray, peaks: np.ndarray,
         if h_m < 2.0:
             continue
         cy, cx = prop.centroid
-        bbox   = prop.bbox                          # (minr, minc, maxr, maxc)
+        bbox   = prop.bbox
         y1, x1 = max(0, int(bbox[0])), max(0, int(bbox[1]))
         y2, x2 = min(rgb.shape[0], int(bbox[2])), min(rgb.shape[1], int(bbox[3]))
         if y2 <= y1 or x2 <= x1:
@@ -819,10 +713,6 @@ def extract_tree_metrics(labels: np.ndarray, peaks: np.ndarray,
     gc.collect()
     return pd.DataFrame(records)
 
-
-# ══════════════════════════════════════════════════════════════
-# SPECIES CLASSIFICATION
-# ══════════════════════════════════════════════════════════════
 
 def _extract_spectral_ref(img_arr: np.ndarray) -> dict:
     R = img_arr[:, :, 0].astype(np.float32)
@@ -878,10 +768,6 @@ def classify_species(df: pd.DataFrame,
     return df
 
 
-# ══════════════════════════════════════════════════════════════
-# CARBON COMPUTATION
-# ══════════════════════════════════════════════════════════════
-
 def compute_carbon(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     rows = {k: [] for k in ["dbh_cm", "volume_m3", "biomass_kg",
@@ -918,10 +804,6 @@ def compute_carbon(df: pd.DataFrame) -> pd.DataFrame:
         df[k] = v
     return df
 
-
-# ══════════════════════════════════════════════════════════════
-# MASK R-CNN SIMULATION
-# ══════════════════════════════════════════════════════════════
 
 def simulate_maskrcnn_detection(rgb: np.ndarray, df_trees: pd.DataFrame,
                                  gsd_m: float = 0.1,
@@ -1073,11 +955,99 @@ def render_maskrcnn_overlay(rgb: np.ndarray, detection: dict,
 
 
 # ══════════════════════════════════════════════════════════════
+# HELPER: KONVERSI RGB KE BASE64 UNTUK IMAGE OVERLAY
+# ══════════════════════════════════════════════════════════════
+
+def rgb_array_to_base64(rgb: np.ndarray, max_dim: int = 1024) -> str:
+    """Konversi numpy array RGB ke base64 PNG string untuk image overlay."""
+    h, w = rgb.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img = Image.fromarray(rgb.astype(np.uint8)).resize((new_w, new_h), Image.LANCZOS)
+    else:
+        img = Image.fromarray(rgb.astype(np.uint8))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def get_image_bounds_wgs84(meta: dict) -> Optional[Tuple[float, float, float, float]]:
+    """
+    Dapatkan batas gambar dalam WGS84 (lat_min, lon_min, lat_max, lon_max).
+    Mengembalikan None jika tidak bisa dihitung.
+    """
+    utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
+    if utm_epsg and utm_bounds:
+        minx, miny, maxx, maxy = utm_bounds
+        # Konversi keempat sudut
+        lon_min, lat_min = convert_utm_to_wgs84(minx, miny, utm_epsg)
+        lon_max, lat_max = convert_utm_to_wgs84(maxx, maxy, utm_epsg)
+        if None not in (lon_min, lat_min, lon_max, lat_max):
+            return (lat_min, lon_min, lat_max, lon_max)
+    return None
+
+
+# ══════════════════════════════════════════════════════════════
+# HELPER: BUAT GEOJSON DARI DATAFRAME POHON
+# ══════════════════════════════════════════════════════════════
+
+def df_trees_to_geojson(df: pd.DataFrame) -> dict:
+    """
+    Konversi dataframe pohon dengan kolom lat/lon ke GeoJSON FeatureCollection.
+    """
+    features = []
+    lat_col = "lat" if "lat" in df.columns else None
+    lon_col = "lon" if "lon" in df.columns else None
+
+    for _, row in df.iterrows():
+        # Koordinat
+        if lat_col and lon_col and pd.notna(row.get(lat_col)) and pd.notna(row.get(lon_col)):
+            lat = float(row[lat_col])
+            lon = float(row[lon_col])
+        else:
+            # Jika belum ada koordinat, skip atau gunakan 0,0
+            lat = 0.0
+            lon = 0.0
+
+        # Properties
+        props = {}
+        for col in df.columns:
+            if col in (lat_col, lon_col):
+                continue
+            val = row[col]
+            if isinstance(val, (np.integer,)):
+                val = int(val)
+            elif isinstance(val, (np.floating,)):
+                val = float(val)
+            elif isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                val = None
+            props[col] = val
+
+        feature = {
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [lon, lat]
+            },
+            "properties": props
+        }
+        features.append(feature)
+
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "crs": {
+            "type": "name",
+            "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}
+        }
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # MAP
 # ══════════════════════════════════════════════════════════════
 
-# Basemap styles yang TIDAK memerlukan Mapbox token
-# (gunakan go.Scattermap bukan go.Scattermapbox)
 BASEMAP_OPTIONS = {
     "OpenStreetMap":   "open-street-map",
     "Carto Positron":  "carto-positron",
@@ -1092,141 +1062,111 @@ def build_plotly_map(df_trees: pd.DataFrame,
                      gsd_m: float = 0.1,
                      img_origin_lat: Optional[float] = None,
                      img_origin_lon: Optional[float] = None,
-                     meta: Optional[dict] = None) -> go.Figure:
+                     meta: Optional[dict] = None,
+                     show_image_overlay: bool = False,
+                     rgb_array: Optional[np.ndarray] = None,
+                     overlay_opacity: float = 0.7) -> go.Figure:
     """
-    Membangun peta distribusi pohon dengan konversi UTM ke WGS84.
+    Membangun peta distribusi pohon dengan opsional layer foto udara.
     """
     COLOR_MAP = {"Pinus merkusii": "#2196F3", "Swietenia mahagoni": "#FF9800"}
     rng       = np.random.default_rng(99)
-    
-    # Debug info
-    st.write(f"Debug: Total pohon sebelum filter: {len(df_trees)}")
-    
+
     df_plot = df_trees.head(3000).copy()
-    st.write(f"Debug: Total pohon setelah limit: {len(df_plot)}")
-    
+
     if df_plot.empty:
         st.warning("Tidak ada data pohon untuk ditampilkan")
         return go.Figure()
 
-    # ── Hitung koordinat setiap pohon ──────────────────────────
     lats, lons = [], []
-    
-    # Cek apakah ada data koordinat dari GeoTIFF
+
     has_utm = False
     utm_epsg = None
     utm_bounds = None
-    
+
     if meta:
-        st.write(f"Debug: Metadata tersedia - CRS: {str(meta.get('crs', 'Tidak ada'))[:200]}...")
-        st.write(f"Debug: Bounds: {meta.get('bounds', 'Tidak ada')}")
-        
-        # Coba ekstrak UTM
         try:
             utm_epsg, utm_bounds = extract_utm_from_geotiff(meta)
             if utm_epsg and utm_bounds:
                 has_utm = True
                 st.success(f"✅ Deteksi UTM: {utm_epsg}")
-                st.write(f"Debug: UTM Bounds: {utm_bounds}")
             else:
                 st.info("ℹ️ Tidak mendeteksi sistem koordinat UTM, menggunakan metode fallback")
         except Exception as e:
             st.warning(f"Error ekstraksi UTM: {str(e)[:100]}")
-    
-    # Hitung koordinat untuk setiap pohon
+
     error_count = 0
     success_count = 0
-    
+
     for idx, row in df_plot.iterrows():
         try:
             if has_utm and utm_epsg and utm_bounds:
-                # Konversi UTM ke WGS84
                 minx, miny, maxx, maxy = utm_bounds
-                
-                # Dapatkan ukuran asli dan resize
                 if meta.get("original_size"):
                     orig_h, orig_w = meta["original_size"]
                     resized_h, resized_w = meta.get("resized_to", (orig_h, orig_w))
-                    
-                    # Hitung faktor skala
                     scale_h = orig_h / resized_h if resized_h > 0 else 1
                     scale_w = orig_w / resized_w if resized_w > 0 else 1
-                    
-                    # Koordinat piksel dalam citra asli
                     px = float(row["centroid_col"]) * scale_w
                     py = float(row["centroid_row"]) * scale_h
-                    
-                    # Konversi piksel ke koordinat UTM
                     x_utm = minx + (px / orig_w) * (maxx - minx)
-                    y_utm = maxy - (py / orig_h) * (maxy - miny)  # Invers Y karena gambar
-                    
-                    # Konversi UTM ke WGS84
+                    y_utm = maxy - (py / orig_h) * (maxy - miny)
                     lon, lat = convert_utm_to_wgs84(x_utm, y_utm, utm_epsg)
-                    
                     if lon is not None and lat is not None:
                         lats.append(lat)
                         lons.append(lon)
                         success_count += 1
                     else:
-                        # Fallback ke metode sederhana
                         lat = center_lat + rng.uniform(-0.0005, 0.0005)
                         lon = center_lon + rng.uniform(-0.0005, 0.0005)
                         lats.append(lat)
                         lons.append(lon)
                         error_count += 1
                 else:
-                    # Fallback
                     lat = center_lat + rng.uniform(-0.0005, 0.0005)
                     lon = center_lon + rng.uniform(-0.0005, 0.0005)
                     lats.append(lat)
                     lons.append(lon)
                     error_count += 1
             else:
-                # Metode sederhana berdasarkan GSD
                 if img_origin_lat is not None and img_origin_lon is not None:
-                    # Konversi piksel ke koordinat geografis
                     lat = img_origin_lat - float(row["centroid_row"]) * gsd_m / 111320.0
                     lon = img_origin_lon + float(row["centroid_col"]) * gsd_m / (111320.0 * math.cos(math.radians(img_origin_lat)))
                 else:
-                    # Spread pohon di sekitar center (untuk visualisasi)
                     angle = rng.uniform(0, 2 * math.pi)
-                    radius = rng.uniform(0, 0.003)  # ~300 meter radius
+                    radius = rng.uniform(0, 0.003)
                     lat = center_lat + radius * math.cos(angle)
                     lon = center_lon + radius * math.sin(angle)
-                
                 lats.append(lat)
                 lons.append(lon)
                 success_count += 1
-                
+
         except Exception as e:
-            st.warning(f"Error pada pohon {idx}: {str(e)[:50]}")
-            # Fallback ke center
             lat = center_lat + rng.uniform(-0.0005, 0.0005)
             lon = center_lon + rng.uniform(-0.0005, 0.0005)
             lats.append(lat)
             lons.append(lon)
             error_count += 1
-    
+
     if success_count > 0:
         st.success(f"✅ Berhasil menghitung koordinat untuk {success_count} pohon")
     if error_count > 0:
         st.info(f"ℹ️ {error_count} pohon menggunakan koordinat fallback")
-    
-    # Tambahkan koordinat ke dataframe
+
     df_plot = df_plot.copy()
     df_plot["lat"] = lats
     df_plot["lon"] = lons
-    
-    # Validasi koordinat
+
     valid_coords = df_plot["lat"].notna() & df_plot["lon"].notna()
     df_plot = df_plot[valid_coords]
-    st.write(f"Debug: {len(df_plot)} pohon dengan koordinat valid")
-    
+
     if df_plot.empty:
         st.error("Tidak ada koordinat valid untuk ditampilkan")
         return go.Figure()
-    
-    # Siapkan hover info
+
+    # Simpan koordinat ke session state untuk GeoJSON export
+    st.session_state["tree_df_with_coords"] = df_plot.copy()
+
     df_plot["emoji"] = df_plot["species"].apply(lambda s: "🌲" if "Pinus" in s else "🌳")
     df_plot["hover"] = df_plot.apply(lambda r: (
         f"<b>{r['emoji']} {r['species']}</b><br>"
@@ -1237,46 +1177,92 @@ def build_plotly_map(df_trees: pd.DataFrame,
         f"| CO₂e: {r.get('co2e_kg', 0):.1f} kg<br>"
         f"Confidence: {r.get('confidence', 0):.1f}%"
     ), axis=1)
-    
-    # Ukuran marker proporsional terhadap ECD
+
     ecd = df_plot["ecd_m"].values.astype(float)
     if ecd.max() > ecd.min():
         norm = (ecd - ecd.min()) / (ecd.max() - ecd.min() + 1e-6)
     else:
         norm = np.ones_like(ecd) * 0.5
     sizes = (norm * 14 + 8).tolist()
-    
-    # Style peta
+
     px_style = BASEMAP_OPTIONS.get(basemap_key, "open-street-map")
-    fig = go.Figure()
-    
-    # Cek versi Plotly
+
     import plotly
     plotly_ver = tuple(int(x) for x in plotly.__version__.split(".")[:2])
     use_new_api = plotly_ver >= (5, 24)
-    
-    # Tambahkan trace untuk setiap spesies
+
+    fig = go.Figure()
+
+    # ── LAYER FOTO UDARA (IMAGE OVERLAY) ──────────────────────
+    if show_image_overlay and rgb_array is not None and meta is not None:
+        img_bounds = get_image_bounds_wgs84(meta)
+        if img_bounds is not None:
+            lat_min, lon_min, lat_max, lon_max = img_bounds
+            # Encode gambar ke base64
+            with st.spinner("🖼 Menyiapkan layer foto udara..."):
+                img_b64 = rgb_array_to_base64(rgb_array, max_dim=1024)
+
+            # Tambahkan sebagai image layer di layout
+            # Plotly mendukung image overlay melalui layout.images
+            fig.add_layout_image(
+                dict(
+                    source=f"data:image/png;base64,{img_b64}",
+                    xref="x", yref="y",
+                    x=lon_min, y=lat_max,
+                    sizex=lon_max - lon_min,
+                    sizey=lat_max - lat_min,
+                    sizing="stretch",
+                    opacity=overlay_opacity,
+                    layer="below",
+                )
+            )
+            st.success(f"✅ Layer foto udara ditambahkan: [{lat_min:.5f}, {lon_min:.5f}] → [{lat_max:.5f}, {lon_max:.5f}]")
+        else:
+            # Fallback: overlay berdasarkan koordinat pohon
+            if len(df_plot) > 0:
+                lat_min_t = df_plot["lat"].min()
+                lat_max_t = df_plot["lat"].max()
+                lon_min_t = df_plot["lon"].min()
+                lon_max_t = df_plot["lon"].max()
+                padding = 0.001
+                lat_min_t -= padding; lat_max_t += padding
+                lon_min_t -= padding; lon_max_t += padding
+
+                with st.spinner("🖼 Menyiapkan layer foto udara (estimasi bounds)..."):
+                    img_b64 = rgb_array_to_base64(rgb_array, max_dim=512)
+
+                fig.add_layout_image(
+                    dict(
+                        source=f"data:image/png;base64,{img_b64}",
+                        xref="x", yref="y",
+                        x=lon_min_t, y=lat_max_t,
+                        sizex=lon_max_t - lon_min_t,
+                        sizey=lat_max_t - lat_min_t,
+                        sizing="stretch",
+                        opacity=overlay_opacity,
+                        layer="below",
+                    )
+                )
+                st.info("ℹ️ Overlay foto udara menggunakan estimasi bounds berdasarkan sebaran pohon")
+
+    # ── SCATTER POHON ──────────────────────────────────────────
     for sp in ["Pinus merkusii", "Swietenia mahagoni"]:
         mask = df_plot["species"] == sp
         if mask.sum() == 0:
             continue
-            
         dsp = df_plot[mask].reset_index(drop=True)
         szs = [sizes[i] for i, m in enumerate(mask) if m]
         color = COLOR_MAP[sp]
         emoji = "🌲" if "Pinus" in sp else "🌳"
         label = f"{emoji} {sp} ({mask.sum()})"
-        
+
         if use_new_api:
             fig.add_trace(go.Scattermap(
                 lat=dsp["lat"].tolist(),
                 lon=dsp["lon"].tolist(),
                 mode="markers",
                 marker=go.scattermap.Marker(
-                    size=szs,
-                    color=color,
-                    opacity=0.8,
-                    sizemode="diameter",
+                    size=szs, color=color, opacity=0.8, sizemode="diameter",
                 ),
                 name=label,
                 text=dsp["hover"].tolist(),
@@ -1288,78 +1274,60 @@ def build_plotly_map(df_trees: pd.DataFrame,
                 lon=dsp["lon"].tolist(),
                 mode="markers",
                 marker=go.scattermapbox.Marker(
-                    size=szs,
-                    color=color,
-                    opacity=0.8,
-                    sizemode="diameter",
+                    size=szs, color=color, opacity=0.8, sizemode="diameter",
                 ),
                 name=label,
                 text=dsp["hover"].tolist(),
                 hovertemplate="%{text}<extra></extra>",
             ))
-    
-    # Hitung center dari data
+
     if len(df_plot) > 0:
         map_center_lat = df_plot["lat"].median()
         map_center_lon = df_plot["lon"].median()
     else:
         map_center_lat = center_lat
         map_center_lon = center_lon
-    
-    # Konfigurasi layout
+
     map_center = dict(lat=map_center_lat, lon=map_center_lon)
     map_zoom = max(zoom - 1, 12)
-    
+
     if use_new_api:
         fig.update_layout(
-            map=dict(
-                style=px_style,
-                center=map_center,
-                zoom=map_zoom,
-            ),
+            map=dict(style=px_style, center=map_center, zoom=map_zoom),
             margin=dict(l=0, r=0, t=30, b=0),
-            height=600,
+            height=620,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#ccc",
-                borderwidth=1,
-                x=0.01, y=0.99,
-                xanchor="left", yanchor="top",
+                bordercolor="#ccc", borderwidth=1,
+                x=0.01, y=0.99, xanchor="left", yanchor="top",
                 font=dict(size=12),
             ),
             title={
                 'text': f"Distribusi Pohon ({len(df_plot)} pohon)",
-                'x': 0.5,
-                'xanchor': 'center',
+                'x': 0.5, 'xanchor': 'center',
                 'font': {'size': 16, 'family': 'DM Sans'}
             }
         )
     else:
         fig.update_layout(
-            mapbox=dict(
-                style="open-street-map",
-                center=map_center,
-                zoom=map_zoom,
-            ),
+            mapbox=dict(style="open-street-map", center=map_center, zoom=map_zoom),
             margin=dict(l=0, r=0, t=30, b=0),
-            height=600,
+            height=620,
             legend=dict(
                 bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#ccc",
-                borderwidth=1,
-                x=0.01, y=0.99,
-                xanchor="left", yanchor="top",
+                bordercolor="#ccc", borderwidth=1,
+                x=0.01, y=0.99, xanchor="left", yanchor="top",
                 font=dict(size=12),
             ),
             title={
                 'text': f"Distribusi Pohon ({len(df_plot)} pohon)",
-                'x': 0.5,
-                'xanchor': 'center',
+                'x': 0.5, 'xanchor': 'center',
                 'font': {'size': 16, 'family': 'DM Sans'}
             }
         )
-    
+
     return fig
+
 
 # ══════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -1417,7 +1385,6 @@ def render_sidebar() -> dict:
     map_lon  = st.sidebar.number_input("Longitude Pusat",-180.0, 180.0, UB_FOREST_LON, 0.0001, format="%.6f")
     map_zoom = st.sidebar.slider("Zoom Level", 10, 20, UB_FOREST_ZOOM)
 
-    # Status library
     st.sidebar.markdown("---")
     st.sidebar.markdown("**Status Library:**")
     for name, has in [("rasterio", HAS_RASTERIO), ("tifffile", HAS_TIFFFILE),
@@ -1437,7 +1404,7 @@ def render_sidebar() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════
-# MAIN FUNCTION - LENGKAP DAN DIPERBAIKI
+# MAIN
 # ══════════════════════════════════════════════════════════════
 
 def main():
@@ -1449,13 +1416,12 @@ def main():
     <p><span class="badge">🛸 UAV Remote Sensing</span>
        <span class="badge">🌿 UB Forest</span>
        <span class="badge">📡 Mask R-CNN</span></p>
-    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB)| Ananda Nibras Naditya Lokiko (Data Analyst - Kehutanan UB)</small></p>
+    <p><small>Credit: Dr. Adipandang Yudono (WebGIS Analytics Developer - PWK UB) | Ananda Nibras Naditya Lokiko (Data Analyst - Kehutanan UB)</small></p>
 </div>
 """, unsafe_allow_html=True)
 
     params = render_sidebar()
 
-    # Buat tabs dengan benar
     tabs = st.tabs([
         "📖 Panduan",
         "🔍 Deteksi Pohon",
@@ -1473,12 +1439,10 @@ def main():
 **Cara Menggunakan:**
 
 1. Upload foto udara di sidebar (GeoTIFF / JPG / PNG, maks **{MAX_UPLOAD_SIZE_MB} MB**)
-
 2. *(Opsional)* Upload sampel tajuk Pinus & Mahoni untuk kalibrasi spektral
-
 3. Atur parameter deteksi, lalu buka tab **Deteksi Pohon** → klik **Jalankan Deteksi**
-
-4. Hasil tersedia di tab: Mask R-CNN, Peta, Analisis Karbon, dan Ekspor
+4. Tab **Peta Distribusi**: aktifkan toggle *Layer Foto Udara* untuk overlay citra di atas peta
+5. Tab **Ekspor**: download CSV dan **GeoJSON** (siap untuk QGIS/ArcGIS/WebGIS)
 
 **Catatan file besar (>200 MB):**
 - Gambar otomatis diresize ke maks {MAX_PIXEL_DIM}px per sisi
@@ -1491,7 +1455,6 @@ def main():
         st.markdown("## Deteksi Pohon")
         if params["uploaded_main"] is None:
             st.info("📁 Upload foto udara di sidebar kiri untuk memulai.")
-            # Jangan return, biarkan tabs lainnya tetap bisa diakses
         else:
             with st.spinner("📂 Memuat gambar…"):
                 rgb, meta = load_image_array(params["uploaded_main"])
@@ -1499,7 +1462,6 @@ def main():
             if rgb is None:
                 st.error("❌ Gambar tidak dapat dimuat. Cek format dan ukuran file.")
             else:
-                # Metadata ringkas
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("Ukuran Gambar",    f"{rgb.shape[1]:,} × {rgb.shape[0]:,} px")
                 c2.metric("Ukuran File",       meta.get("file_size_display", "—"))
@@ -1515,7 +1477,6 @@ def main():
                         f" → Resized: {meta['resized_to'][0]}×{meta['resized_to'][1]} px"
                     )
 
-                # Preview
                 st.markdown("### Preview Foto Udara")
                 prev = Image.fromarray(rgb)
                 w, h = prev.size
@@ -1523,7 +1484,6 @@ def main():
                     prev = prev.resize((800, int(h * 800 / w)))
                 st.image(prev, caption=f"Citra UAV — {meta.get('driver','')}", use_container_width=True)
 
-                # Tombol deteksi
                 if st.button("🚀 Jalankan Deteksi", type="primary", use_container_width=True):
                     t0  = time.time()
                     gsd = meta.get("gsd_m") or params["gsd"]
@@ -1545,7 +1505,6 @@ def main():
                         df_trees = extract_tree_metrics(labels, peaks, chm, rgb, gsd)
                     prog.progress(65, f"{len(df_trees)} pohon tervalidasi…")
 
-                    # Referensi spektral opsional
                     pinus_ref = mahoni_ref = None
                     if params["uploaded_pinus"]:
                         arr = load_sample_image(params["uploaded_pinus"], "Sampel Pinus")
@@ -1564,7 +1523,6 @@ def main():
                         df_trees = compute_carbon(df_trees)
                     prog.progress(95, "Hampir selesai…")
 
-                    # Simpan ke session state
                     st.session_state["tree_df"] = df_trees
                     st.session_state["rgb"]     = rgb
                     st.session_state["chm"]     = chm
@@ -1653,84 +1611,97 @@ def main():
             st.download_button("⬇ Download Overlay (PNG)", buf.getvalue(),
                                "mask_rcnn_overlay.png", "image/png")
 
-    # ── TAB 3: PETA DISTRIBUSI (YANG DIPERBAIKI) ───────────────────────────────
+    # ── TAB 3: PETA DISTRIBUSI ────────────────────────────────
     with tabs[3]:
         st.markdown("## 🗺 Peta Distribusi Pohon")
-        
-        # Cek apakah data tersedia
+
         if "tree_df" not in st.session_state:
-            st.warning("⚠️ Belum ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu di tab **Deteksi Pohon**.")
-            st.info("💡 **Petunjuk:** Upload file GeoTIFF/JPG/PNG di sidebar kiri, lalu buka tab 'Deteksi Pohon' dan klik tombol 'Jalankan Deteksi'")
+            st.warning("⚠️ Belum ada data pohon. Silakan jalankan deteksi pohon terlebih dahulu.")
+            st.info("💡 **Petunjuk:** Upload file GeoTIFF/JPG/PNG di sidebar kiri, lalu buka tab 'Deteksi Pohon' dan klik 'Jalankan Deteksi'")
         else:
-            df = st.session_state["tree_df"]
+            df   = st.session_state["tree_df"]
             meta = st.session_state.get("meta", {})
-            gsd = st.session_state.get("gsd", params["gsd"])
-            
+            gsd  = st.session_state.get("gsd", params["gsd"])
+            rgb  = st.session_state.get("rgb", None)
+
             if df.empty:
-                st.warning("⚠️ Data pohon kosong. Silakan jalankan deteksi pohon kembali.")
+                st.warning("⚠️ Data pohon kosong.")
             else:
-                # Ringkasan data
                 st.markdown("### 📊 Ringkasan Data")
                 col1, col2, col3, col4 = st.columns(4)
                 sp_counts = df["species"].value_counts()
-                
-                with col1:
-                    st.metric("🌲 Pinus merkusii", f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
-                with col2:
-                    st.metric("🌳 Swietenia mahagoni", f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
-                with col3:
-                    st.metric("📍 Total Pohon", f"{len(df):,} pohon")
-                with col4:
-                    st.metric("📏 GSD", f"{gsd:.3f} m/px")
-                
+                col1.metric("🌲 Pinus merkusii",      f"{sp_counts.get('Pinus merkusii', 0):,} pohon")
+                col2.metric("🌳 Swietenia mahagoni",   f"{sp_counts.get('Swietenia mahagoni', 0):,} pohon")
+                col3.metric("📍 Total Pohon",           f"{len(df):,} pohon")
+                col4.metric("📏 GSD",                   f"{gsd:.3f} m/px")
+
                 st.markdown("---")
-                
-                # Kontrol peta
                 st.markdown("### 🎮 Kontrol Peta")
+
                 col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 1])
-                
                 with col_ctrl1:
-                    basemap = st.selectbox(
-                        "🗺 Peta Dasar:",
-                        list(BASEMAP_OPTIONS.keys()),
-                        index=0,
-                    )
-                
+                    basemap = st.selectbox("🗺 Peta Dasar:", list(BASEMAP_OPTIONS.keys()), index=0)
                 with col_ctrl2:
                     filter_sp = st.multiselect(
                         "🔍 Filter Spesies:",
                         ["Pinus merkusii", "Swietenia mahagoni"],
                         default=["Pinus merkusii", "Swietenia mahagoni"],
                     )
-                
                 with col_ctrl3:
                     show_count = st.number_input(
-                        "📌 Maks titik", 
-                        min_value=100, 
-                        max_value=5000, 
-                        value=min(2000, len(df)),
-                        step=100
+                        "📌 Maks titik",
+                        min_value=100, max_value=5000,
+                        value=min(2000, len(df)), step=100
                     )
-                
+
+                # ── KONTROL LAYER FOTO UDARA (BARU) ──────────────────
+                st.markdown("---")
+                st.markdown("### 🛸 Layer Foto Udara")
+                layer_col1, layer_col2 = st.columns([1, 2])
+                with layer_col1:
+                    show_aerial = st.toggle(
+                        "Tampilkan Layer Foto Udara",
+                        value=False,
+                        help="Overlay citra UAV di atas peta. Memerlukan koordinat GeoTIFF atau estimasi berdasarkan sebaran pohon."
+                    )
+                with layer_col2:
+                    overlay_opacity = st.slider(
+                        "Opasitas Overlay",
+                        min_value=0.1, max_value=1.0, value=0.7, step=0.05,
+                        disabled=not show_aerial,
+                        help="Atur transparansi layer foto udara (0 = transparan, 1 = opaque)"
+                    )
+
+                if show_aerial:
+                    if rgb is None:
+                        st.warning("⚠️ Data citra UAV tidak tersedia. Pastikan foto udara sudah diupload dan dideteksi.")
+                        show_aerial = False
+                    else:
+                        img_bounds = get_image_bounds_wgs84(meta)
+                        if img_bounds:
+                            lat_min, lon_min, lat_max, lon_max = img_bounds
+                            st.info(
+                                f"📍 Bounds foto udara (WGS84): "
+                                f"[{lat_min:.5f}°, {lon_min:.5f}°] → [{lat_max:.5f}°, {lon_max:.5f}°]"
+                            )
+                        else:
+                            st.info("ℹ️ Koordinat GeoTIFF tidak tersedia — overlay menggunakan estimasi sebaran pohon.")
+
                 # Filter data
                 if filter_sp:
                     df_map = df[df["species"].isin(filter_sp)].copy()
                 else:
                     df_map = df.copy()
-                
-                # Batasi jumlah titik untuk performa
+
                 if len(df_map) > show_count:
                     df_map = df_map.sample(n=show_count, random_state=42)
-                    st.info(f"📊 Menampilkan {show_count:,} dari {len(df):,} total pohon untuk performa optimal")
-                
+                    st.info(f"📊 Menampilkan {show_count:,} dari {len(df):,} total pohon")
+
                 if df_map.empty:
-                    st.warning("⚠️ Tidak ada pohon untuk ditampilkan dengan filter yang dipilih.")
+                    st.warning("⚠️ Tidak ada pohon untuk ditampilkan.")
                 else:
-                    # Tentukan koordinat pusat
                     center_lat = params["map_lat"]
                     center_lon = params["map_lon"]
-                    
-                    # Cek apakah ada koordinat dari GeoTIFF
                     if meta.get("bounds"):
                         try:
                             bounds = meta["bounds"]
@@ -1738,30 +1709,25 @@ def main():
                                 left, bottom, right, top = bounds[0], bounds[1], bounds[2], bounds[3]
                                 center_lat = (bottom + top) / 2
                                 center_lon = (left + right) / 2
-                                st.info(f"📍 Menggunakan koordinat dari GeoTIFF: {center_lat:.5f}, {center_lon:.5f}")
-                        except Exception as e:
-                            st.warning(f"Gagal membaca koordinat GeoTIFF: {str(e)[:100]}")
-                    
-                    # Buat peta
+                        except Exception:
+                            pass
+
                     with st.spinner("🔄 Membangun peta distribusi..."):
                         try:
                             fig_map = build_plotly_map(
-                                df_map, 
-                                basemap,
-                                center_lat, 
-                                center_lon,
-                                params["map_zoom"], 
-                                gsd,
-                                None,  # img_origin_lat
-                                None,  # img_origin_lon
-                                meta
+                                df_map, basemap,
+                                center_lat, center_lon,
+                                params["map_zoom"], gsd,
+                                None, None, meta,
+                                show_image_overlay=show_aerial,
+                                rgb_array=rgb if show_aerial else None,
+                                overlay_opacity=overlay_opacity,
                             )
-                            
-                            # Tampilkan peta
+
                             if fig_map and len(fig_map.data) > 0:
-                                st.plotly_chart(fig_map, use_container_width=True, config={'displayModeBar': True})
-                                
-                                # Informasi tambahan
+                                st.plotly_chart(fig_map, use_container_width=True,
+                                                config={'displayModeBar': True})
+
                                 st.markdown("---")
                                 st.markdown("### ℹ️ Informasi Peta")
                                 info_col1, info_col2, info_col3 = st.columns(3)
@@ -1773,36 +1739,34 @@ def main():
                                     if meta.get("crs"):
                                         crs_str = str(meta["crs"])[:50]
                                         st.markdown(f"**🗺️ Sistem koordinat:** {crs_str}...")
-                                
-                                # Legenda
+
                                 st.markdown(
                                     """
-                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 8px; margin-top: 10px; border-left: 4px solid #4CAF50;">
+                                    <div style="background: #f8f9fa; padding: 12px; border-radius: 8px;
+                                                margin-top: 10px; border-left: 4px solid #4CAF50;">
                                     <small>
                                     🎨 <b>Legenda:</b><br>
                                     🔵 <b>Biru</b> = <i>Pinus merkusii</i> (Tusam)<br>
                                     🟠 <b>Oranye</b> = <i>Swietenia mahagoni</i> (Mahoni)<br>
                                     📏 <b>Ukuran marker</b> = proporsional dengan diameter tajuk (ECD)<br>
                                     🖱️ <b>Hover / Klik</b> pada titik untuk melihat detail pohon<br>
-                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta
+                                    🔍 <b>Zoom</b> menggunakan scroll atau tombol +/- di peta<br>
+                                    🛸 <b>Toggle "Layer Foto Udara"</b> untuk menampilkan citra UAV
                                     </small>
                                     </div>
                                     """,
                                     unsafe_allow_html=True,
                                 )
                             else:
-                                st.error("❌ Gagal membuat peta: tidak ada data yang dapat ditampilkan")
-                                st.info("💡 Tips: Coba kurangi filter atau refresh halaman")
-                                
+                                st.error("❌ Gagal membuat peta.")
                         except Exception as e:
                             st.error(f"❌ Error saat membuat peta: {str(e)}")
                             st.exception(e)
-                
+
                 # Statistik per spesies
                 if not df.empty:
                     st.markdown("---")
                     st.markdown("### 📈 Statistik per Spesies")
-                    
                     stats_df = df.groupby("species").agg({
                         "id": "count",
                         "height_m": ["mean", "std"],
@@ -1811,12 +1775,9 @@ def main():
                         "carbon_kg": "sum",
                         "co2e_kg": "sum"
                     }).round(2)
-                    
-                    # Rename columns
-                    stats_df.columns = ["Jumlah", "Tinggi (m)", "Std Tinggi", 
-                                        "ECD (m)", "Std ECD", 
+                    stats_df.columns = ["Jumlah", "Tinggi (m)", "Std Tinggi",
+                                        "ECD (m)", "Std ECD",
                                         "Luas Tajuk (m²)", "Total Karbon (kg)", "Total CO₂e (kg)"]
-                    
                     st.dataframe(stats_df, use_container_width=True)
 
     # ── TAB 4: ANALISIS KARBON ───────────────────────────────
@@ -1897,24 +1858,202 @@ def main():
 
     # ── TAB 6: EKSPOR ────────────────────────────────────────
     with tabs[6]:
-        st.markdown("## Ekspor Data")
+        st.markdown("## 📥 Ekspor Data")
+
         if "tree_df" not in st.session_state:
             st.info("Jalankan deteksi pohon terlebih dahulu.")
         else:
             df   = st.session_state["tree_df"]
             meta = st.session_state.get("meta", {})
 
+            # Gunakan data dengan koordinat jika tersedia (dari tab peta)
+            df_with_coords = st.session_state.get("tree_df_with_coords", None)
+
+            st.markdown("---")
+            st.markdown("### 📊 Ringkasan")
+            exp_col1, exp_col2, exp_col3 = st.columns(3)
+            exp_col1.metric("Total Pohon",   f"{len(df):,}")
+            exp_col2.metric("File Diproses", meta.get("file_size_display", "—"))
+            if not df.empty:
+                exp_col3.metric("Total Karbon", f"{df['carbon_kg'].sum()/1000:.2f} ton C")
+
+            st.markdown("---")
+
+            # ── EKSPOR CSV ────────────────────────────────────────
+            st.markdown("### 📄 Ekspor CSV")
+            st.markdown("Data lengkap semua pohon terdeteksi dalam format CSV.")
             csv = df.to_csv(index=False).encode("utf-8")
             st.download_button(
-                "⬇ Download CSV (Data Lengkap)", csv,
-                "ub_forest_hasil_deteksi.csv", "text/csv",
+                "⬇ Download CSV (Data Lengkap)",
+                csv,
+                "ub_forest_hasil_deteksi.csv",
+                "text/csv",
                 use_container_width=True,
             )
-            if meta.get("file_size_display"):
-                st.info(f"📊 File diproses: {meta['file_size_display']}")
-            st.info(f"🌲 Total pohon: {len(df):,}")
-            if not df.empty:
-                st.info(f"💰 Total karbon: {df['carbon_kg'].sum()/1000:.2f} ton C")
+
+            st.markdown("---")
+
+            # ── EKSPOR GEOJSON (BARU) ─────────────────────────────
+            st.markdown("### 🌐 Ekspor GeoJSON")
+            st.markdown(
+                "Format GeoJSON standar — dapat langsung dibuka di **QGIS**, **ArcGIS**, "
+                "**Mapbox**, **Leaflet**, **Google Earth**, dan aplikasi WebGIS lainnya."
+            )
+
+            # Cek ketersediaan koordinat
+            has_coords = df_with_coords is not None and "lat" in df_with_coords.columns and "lon" in df_with_coords.columns
+
+            if has_coords:
+                n_with_coords = df_with_coords["lat"].notna().sum()
+                st.success(f"✅ {n_with_coords:,} pohon memiliki koordinat WGS84 dari tab Peta Distribusi.")
+                df_for_geojson = df_with_coords
+            else:
+                st.warning(
+                    "⚠️ Koordinat WGS84 belum tersedia. Buka tab **Peta Distribusi** terlebih dahulu "
+                    "agar koordinat dihitung, kemudian kembali ke sini untuk download GeoJSON dengan koordinat akurat."
+                )
+                # Tetap buat GeoJSON dengan koordinat 0,0 sebagai placeholder
+                df_for_geojson = df.copy()
+                df_for_geojson["lat"] = 0.0
+                df_for_geojson["lon"] = 0.0
+
+            # Pilihan format GeoJSON
+            geojson_col1, geojson_col2 = st.columns(2)
+            with geojson_col1:
+                geojson_indent = st.checkbox("Format JSON yang rapi (pretty-print)", value=False,
+                                              help="Menghasilkan file lebih besar tapi mudah dibaca manusia")
+            with geojson_col2:
+                include_crown = st.checkbox("Sertakan poligon tajuk (crown polygon)",
+                                             value=False,
+                                             help="Tambahkan representasi lingkaran tajuk sebagai Polygon. "
+                                                  "Membuat file lebih besar.")
+
+            # Generate GeoJSON
+            with st.spinner("🔄 Membuat GeoJSON..."):
+                if include_crown and has_coords:
+                    # Buat GeoJSON dengan polygon tajuk (lingkaran approx)
+                    features = []
+                    for _, row in df_for_geojson.iterrows():
+                        lat = float(row.get("lat", 0))
+                        lon = float(row.get("lon", 0))
+                        ecd = float(row.get("ecd_m", 5))
+                        # Buat lingkaran approx (16 titik)
+                        radius_deg = (ecd / 2) / 111320.0
+                        crown_coords = []
+                        for i in range(17):
+                            angle = 2 * math.pi * i / 16
+                            clat = lat + radius_deg * math.cos(angle)
+                            clon = lon + radius_deg * math.sin(angle) / max(math.cos(math.radians(lat)), 1e-6)
+                            crown_coords.append([clon, clat])
+
+                        props = {}
+                        for col in df_for_geojson.columns:
+                            if col in ("lat", "lon"):
+                                continue
+                            val = row[col]
+                            if isinstance(val, (np.integer,)):
+                                val = int(val)
+                            elif isinstance(val, (np.floating,)):
+                                val = float(val)
+                            elif isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                                val = None
+                            props[col] = val
+
+                        features.append({
+                            "type": "Feature",
+                            "geometry": {
+                                "type": "GeometryCollection",
+                                "geometries": [
+                                    {"type": "Point", "coordinates": [lon, lat]},
+                                    {"type": "Polygon", "coordinates": [crown_coords]},
+                                ]
+                            },
+                            "properties": props,
+                        })
+
+                    geojson_data = {
+                        "type": "FeatureCollection",
+                        "features": features,
+                        "crs": {
+                            "type": "name",
+                            "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}
+                        }
+                    }
+                else:
+                    geojson_data = df_trees_to_geojson(df_for_geojson)
+
+                indent_val = 2 if geojson_indent else None
+                geojson_str = json.dumps(geojson_data, ensure_ascii=False, indent=indent_val)
+                geojson_bytes = geojson_str.encode("utf-8")
+
+            geojson_size_kb = len(geojson_bytes) / 1024
+            st.info(f"📦 Ukuran GeoJSON: {geojson_size_kb:.1f} KB | {len(geojson_data['features']):,} features")
+
+            st.download_button(
+                "⬇ Download GeoJSON (Titik Pohon)",
+                geojson_bytes,
+                "ub_forest_pohon.geojson",
+                "application/geo+json",
+                use_container_width=True,
+            )
+
+            if include_crown and has_coords:
+                st.download_button(
+                    "⬇ Download GeoJSON (Titik + Tajuk Pohon)",
+                    geojson_bytes,
+                    "ub_forest_pohon_dengan_tajuk.geojson",
+                    "application/geo+json",
+                    use_container_width=True,
+                )
+
+            # Panduan penggunaan GeoJSON
+            with st.expander("📖 Cara menggunakan file GeoJSON"):
+                st.markdown("""
+**QGIS:**
+1. Buka QGIS → Layer → Add Layer → Add Vector Layer
+2. Pilih file `.geojson` → Open
+3. Atur symbology berdasarkan kolom `species`
+
+**ArcGIS Pro / ArcMap:**
+1. Add Data → pilih file `.geojson`
+2. Atau drag & drop langsung ke map canvas
+
+**Google Earth:**
+1. File → Open → pilih `.geojson`
+2. Pastikan koordinat WGS84 tersedia (buka tab Peta dahulu)
+
+**Leaflet / Mapbox (Web):**
+```javascript
+fetch('ub_forest_pohon.geojson')
+  .then(r => r.json())
+  .then(data => L.geoJSON(data).addTo(map));
+```
+
+**Kolom utama dalam GeoJSON:**
+- `species`: Nama spesies (Pinus merkusii / Swietenia mahagoni)
+- `height_m`: Tinggi pohon estimasi (meter)
+- `ecd_m`: Diameter tajuk ekuivalen (meter)
+- `carbon_kg`: Estimasi simpanan karbon (kg C)
+- `co2e_kg`: Setara CO₂ (kg CO₂e)
+- `dbh_cm`: Diameter batang setinggi dada estimasi (cm)
+- `volume_m3`: Volume kayu estimasi (m³)
+                """)
+
+            st.markdown("---")
+            # Metadata ekspor
+            st.markdown("### ℹ️ Metadata")
+            meta_info = {
+                "total_pohon": len(df),
+                "spesies": {sp: int(cnt) for sp, cnt in df["species"].value_counts().items()},
+                "total_karbon_ton_C": round(df["carbon_kg"].sum() / 1000, 3) if not df.empty else 0,
+                "total_co2e_ton": round(df["co2e_kg"].sum() / 1000, 3) if not df.empty else 0,
+                "total_volume_m3": round(df["volume_m3"].sum(), 3) if not df.empty else 0,
+                "gsd_m": st.session_state.get("gsd", params["gsd"]),
+                "crs_source": str(meta.get("crs", "Tidak diketahui"))[:100],
+                "koordinat_wgs84_tersedia": has_coords,
+                "file_size": meta.get("file_size_display", "—"),
+            }
+            st.json(meta_info)
 
 
 if __name__ == "__main__":
